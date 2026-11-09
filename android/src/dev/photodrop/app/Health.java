@@ -119,6 +119,15 @@ public final class Health {
         return free >= 0;
     }
 
+    public static String human(long bytes) {
+        if (bytes < 0) return "--";
+        double b = bytes;
+        String[] u = {"B", "KB", "MB", "GB", "TB"};
+        int i = 0;
+        while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
+        return String.format(java.util.Locale.US, "%.1f %s", b, u[i]);
+    }
+
     public boolean isLow() {
         return known() && reserve > 0 && free <= reserve;
     }

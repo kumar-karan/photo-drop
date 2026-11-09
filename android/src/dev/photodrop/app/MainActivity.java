@@ -104,6 +104,11 @@ public class MainActivity extends Activity {
     StorageBarView storageBar;
     TextView tvSessions;
 
+    View liveTransferBox;
+    TextView tvTransferBadge;
+    TextView tvTransferSummary;
+    TextView tvTransferFiles;
+
     View liveStopSection;
     Button btnStop;
     Button btnOwner;
@@ -152,6 +157,18 @@ public class MainActivity extends Activity {
         tvFree = findViewById(R.id.tvFree);
         storageBar = findViewById(R.id.storageBar);
         tvSessions = findViewById(R.id.tvSessions);
+
+        liveTransferBox = findViewById(R.id.liveTransferBox);
+        tvTransferBadge = findViewById(R.id.tvTransferBadge);
+        tvTransferSummary = findViewById(R.id.tvTransferSummary);
+        tvTransferFiles = findViewById(R.id.tvTransferFiles);
+        liveTransferBox.setOnClickListener(v -> {
+            if (lastHealth != null && lastHealth.up) {
+                try {
+                    startActivity(new Intent(MainActivity.this, OwnerActivity.class));
+                } catch (Exception ignored) {}
+            }
+        });
 
         liveStopSection = findViewById(R.id.liveStopSection);
         btnStop = findViewById(R.id.btnStop);
@@ -231,14 +248,18 @@ public class MainActivity extends Activity {
             bootstrap();
         }
         refresh();
+        if (poller != null) {
+            handler.removeCallbacks(poller);
+        }
         poller = new Runnable() {
             @Override
             public void run() {
                 refresh();
-                handler.postDelayed(this, 7000);
+                long delay = (state == AppState.STOPPED) ? 3000 : 1500;
+                handler.postDelayed(this, delay);
             }
         };
-        handler.postDelayed(poller, 7000);
+        handler.postDelayed(poller, 1500);
     }
 
     @Override
@@ -448,6 +469,7 @@ public class MainActivity extends Activity {
             String share = currentShareUrl();
             PhotoDropService.start(this, share, domainOf(share),
                     h.known() ? human(h.free) : "");
+            PhotoDropService.updateWithHealth(this, h, share, domainOf(share));
         } else {
             PhotoDropService.stop(this);
         }
@@ -469,14 +491,51 @@ public class MainActivity extends Activity {
             tvSessions.setText(h.inFlightCount + (h.inFlightCount == 1 ? " UPLOADING" : " UPLOADING"));
             tvSessions.setBackgroundResource(R.drawable.pill_warning);
             tvSessions.setTextColor(0xFF8C1D18);
-        } else if (h.isActive) {
+
+            liveTransferBox.setVisibility(View.VISIBLE);
+            tvTransferBadge.setText("● UPLOADING (" + h.inFlightCount + ")");
+            tvTransferBadge.setBackgroundResource(R.drawable.pill_warning);
+            tvTransferBadge.setTextColor(0xFF8C1D18);
+            String mainFile = !h.inFlightFiles.isEmpty() ? h.inFlightFiles.get(0) : "Receiving photos...";
+            tvTransferSummary.setText(mainFile);
+
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < h.inFlightFiles.size(); i++) {
+                if (i > 0) sb.append(", ");
+                sb.append(h.inFlightFiles.get(i));
+                if (i >= 2 && h.inFlightFiles.size() > 3) {
+                    sb.append(" (+").append(h.inFlightFiles.size() - 3).append(" more)");
+                    break;
+                }
+            }
+            tvTransferFiles.setText(sb.toString());
+        } else if (h.isActive && !h.recentFiles.isEmpty()) {
             tvSessions.setText("ACTIVE");
             tvSessions.setBackgroundResource(R.drawable.pill_success);
             tvSessions.setTextColor(getColor(R.color.success));
+
+            liveTransferBox.setVisibility(View.VISIBLE);
+            tvTransferBadge.setText("● RECENT");
+            tvTransferBadge.setBackgroundResource(R.drawable.pill_success);
+            tvTransferBadge.setTextColor(getColor(R.color.success));
+            tvTransferSummary.setText("Received " + h.recentCount + (h.recentCount == 1 ? " file" : " files"));
+
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < h.recentFiles.size(); i++) {
+                if (i > 0) sb.append(", ");
+                sb.append(h.recentFiles.get(i));
+                if (i >= 2 && h.recentFiles.size() > 3) {
+                    sb.append(" (+").append(h.recentFiles.size() - 3).append(" more)");
+                    break;
+                }
+            }
+            tvTransferFiles.setText(sb.toString());
         } else {
             tvSessions.setText(h.sessions + (h.sessions == 1 ? " SESSION" : " SESSIONS"));
             tvSessions.setBackgroundResource(h.sessions > 0 ? R.drawable.pill_success : R.drawable.pill_neutral);
             tvSessions.setTextColor(h.sessions > 0 ? getColor(R.color.success) : getColor(R.color.text_muted));
+
+            liveTransferBox.setVisibility(View.GONE);
         }
 
         // State layout switching
@@ -490,6 +549,7 @@ public class MainActivity extends Activity {
                 alertCard.setVisibility(View.GONE);
                 permCard.setVisibility(View.GONE);
                 liveControls.setVisibility(View.GONE);
+                liveTransferBox.setVisibility(View.GONE);
                 liveStopSection.setVisibility(View.GONE);
                 break;
 
@@ -502,6 +562,7 @@ public class MainActivity extends Activity {
                 alertCard.setVisibility(View.GONE);
                 permCard.setVisibility(View.GONE);
                 liveControls.setVisibility(View.GONE);
+                liveTransferBox.setVisibility(View.GONE);
                 liveStopSection.setVisibility(View.GONE);
                 break;
 
