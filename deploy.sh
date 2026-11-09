@@ -45,7 +45,7 @@ say "2/5  Termux present"
 say "3/5  uploading files"
 adb -s "$SERIAL" shell rm -rf "$STAGE" >/dev/null 2>&1
 adb -s "$SERIAL" shell mkdir -p "$STAGE" >/dev/null 2>&1
-for f in server.py media_scan.sh install.sh start.sh stop.sh pd-control.sh README.md LICENSE .gitignore; do
+for f in server.py media_scan.sh install.sh start.sh stop.sh pd-control.sh lib.sh README.md LICENSE .gitignore; do
   adb -s "$SERIAL" push -q "$SRC/$f" "$STAGE/$f" >/dev/null || die "push failed: $f"
 done
 adb -s "$SERIAL" push -q "$SRC/tests" "$STAGE/tests" >/dev/null || die "push failed: tests/"

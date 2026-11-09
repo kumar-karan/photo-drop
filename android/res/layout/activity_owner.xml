@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/page_bg"
+    android:orientation="vertical">
+
+    <!-- Thin native chrome. The page below is the product; this bar only adds
+         a reliable back path and a manual refresh. -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingLeft="8dp"
+        android:paddingTop="6dp"
+        android:paddingRight="8dp"
+        android:paddingBottom="6dp">
+
+        <Button
+            android:id="@+id/btnOwnerBack"
+            android:layout_width="42dp"
+            android:layout_height="42dp"
+            android:background="@drawable/btn_text_only"
+            android:contentDescription="Back"
+            android:text="‹"
+            android:textColor="@color/text_main"
+            android:textSize="26sp"/>
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginLeft="4dp"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Live dashboard"
+                android:textColor="@color/text_main"
+                android:textSize="16sp"
+                android:textStyle="bold"/>
+
+            <TextView
+                android:id="@+id/tvOwnerStatus"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Connecting…"
+                android:textColor="@color/text_faint"
+                android:textSize="11.5sp"/>
+        </LinearLayout>
+
+        <Button
+            android:id="@+id/btnOwnerRefresh"
+            android:layout_width="42dp"
+            android:layout_height="42dp"
+            android:background="@drawable/btn_text_only"
+            android:contentDescription="Refresh"
+            android:text="⟳"
+            android:textColor="@color/text_muted"
+            android:textSize="19sp"/>
+    </LinearLayout>
+
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <WebView
+            android:id="@+id/ownerWeb"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="@color/page_bg"/>
+
+        <LinearLayout
+            android:id="@+id/ownerOffline"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:gravity="center"
+            android:orientation="vertical"
+            android:padding="32dp"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Server is offline"
+                android:textColor="@color/text_main"
+                android:textSize="20sp"
+                android:textStyle="bold"/>
+
+            <TextView
+                android:id="@+id/tvOwnerOfflineBody"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:gravity="center"
+                android:lineSpacingExtra="2dp"
+                android:text="Start Photo Drop from the main screen, then tap Retry."
+                android:textColor="@color/text_muted"
+                android:textSize="13.5sp"/>
+
+            <Button
+                android:id="@+id/btnOwnerRetry"
+                android:layout_width="match_parent"
+                android:layout_height="46dp"
+                android:layout_marginTop="18dp"
+                android:background="@drawable/btn_primary"
+                android:text="Retry"
+                android:textAllCaps="false"
+                android:textColor="@color/on_primary"
+                android:textSize="14sp"
+                android:textStyle="bold"/>
+        </LinearLayout>
+    </FrameLayout>
+
+</LinearLayout>

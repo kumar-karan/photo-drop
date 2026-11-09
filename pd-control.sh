@@ -23,6 +23,20 @@ EXPORT="/sdcard/Android/data/dev.photodrop.app/files"
 mkdir -p "$STATE" "$LOGS"
 [ -d "$EXPORT" ] || mkdir -p "$EXPORT" 2>/dev/null
 
+# Shared /proc process helpers. The app runs this script from $HOME, while the
+# checkout lives in $HOME/photo-drop, so try both locations.
+for _lib in "$HOME/photo-drop/lib.sh" "/sdcard/photo-drop/lib.sh" "$(dirname "$0")/lib.sh"; do
+  if [[ -f "$_lib" ]]; then
+    # shellcheck disable=SC1090
+    . "$_lib"
+    break
+  fi
+done
+if ! command -v ensure_dead >/dev/null 2>&1; then
+  echo "lib.sh is missing — copy the whole photo-drop directory to ~/photo-drop." >&2
+  exit 1
+fi
+
 cmd="${1:-}"
 
 start_watchdog() {
@@ -49,18 +63,13 @@ start_watchdog() {
       THEN=$(stat -c %Y "$HB" 2>/dev/null || echo 0)
       AGE=$(( NOW - THEN ))
       if [ "$AGE" -gt "$LIMIT" ]; then
-        pkill -f "photo-drop/server.py" 2>/dev/null
-        pkill -f "cloudflared tunnel"    2>/dev/null
+        kill_matching "photo-drop/server.py"
+        kill_matching "cloudflared tunnel"
         exit 0
       fi
     done
   ' >"$LOGS/watchdog.log" 2>&1 < /dev/null &
   disown 2>/dev/null
-}
-
-stop_watchdog() {
-  pkill -9 -f 'heartbeat' 2>/dev/null
-  pkill -9 -f 'photo-drop-watchdog' 2>/dev/null
 }
 
 case "$cmd" in
@@ -76,10 +85,13 @@ case "$cmd" in
         OLD="$(grep '^PHOTO_DROP_TOKEN=' "$ENVF" 2>/dev/null | cut -d= -f2-)"
       fi
 
-      # What the RUNNING process actually holds.
+      # What the RUNNING process actually holds. The log appends across
+      # restarts, so the LAST match is the current process — grep -m1 would
+      # read a token from a previous run and wrongly conclude no restart is
+      # needed.
       RUNNING=""
       if [[ -f "$LOGS/server.log" ]]; then
-        RUNNING="$(grep -m1 -oE ':8080/d/[^ ]+' "$LOGS/server.log" 2>/dev/null | cut -d/ -f3)"
+        RUNNING="$(grep -oE ':8080/d/[^ ]+' "$LOGS/server.log" 2>/dev/null | tail -1 | cut -d/ -f3)"
       fi
 
       cat > "$ENVF" <<EOF
@@ -91,19 +103,22 @@ PHOTO_DROP_HOST=127.0.0.1
 PHOTO_DROP_RESERVE_BYTES=2147483648
 EOF
       chmod 600 "$ENVF"
-      # Restart only when the running process is holding a different secret
-      if [[ -n "$RUNNING" && "$RUNNING" != "$DROP" ]]; then
-        if pgrep -f 'photo-drop/server.py' >/dev/null 2>&1; then
-          pkill -f 'photo-drop/server.py' >/dev/null 2>&1
-          sleep 1
-          export PATH="/data/data/com.termux/files/usr/bin:$PATH"
-          ( set -a; . "$ENVF"; set +a
-            setsid "$VENV" "$APP/server.py" > "$LOGS/server.log" 2>&1 < /dev/null &
-            disown 2>/dev/null ) >/dev/null 2>&1
-          echo "env written; server restarted with the new token"
-        else
-          echo "env written"
-        fi
+      # Restart only when the running process is holding a different secret.
+      # OLD is what the env had; RUNNING is what the process logged. Either
+      # one disagreeing means the app's token would 404 against the server,
+      # which is exactly the "owner dashboard is broken" failure.
+      NEEDS_RESTART=0
+      if [ -n "$(pids_matching 'photo-drop/server.py')" ]; then
+        if [[ -n "$RUNNING" && "$RUNNING" != "$DROP" ]]; then NEEDS_RESTART=1; fi
+        if [[ -n "$OLD" && "$OLD" != "$DROP" ]]; then NEEDS_RESTART=1; fi
+      fi
+      if [[ "$NEEDS_RESTART" == "1" ]]; then
+        ensure_dead 'photo-drop/server.py'
+        export PATH="/data/data/com.termux/files/usr/bin:$PATH"
+        ( set -a; . "$ENVF"; set +a
+          setsid "$VENV" "$APP/server.py" > "$LOGS/server.log" 2>&1 < /dev/null &
+          disown 2>/dev/null ) >/dev/null 2>&1
+        echo "env written; server restarted with the new token"
       else
         echo "env written"
       fi
@@ -121,8 +136,7 @@ EOF
       echo "venv missing. Run install.sh in ~/photo-drop first." >&2
       exit 1
     fi
-    pkill -f 'photo-drop/server.py' 2>/dev/null
-    sleep 1
+    ensure_dead 'photo-drop/server.py'
     termux-wake-lock 2>/dev/null || true
 
     setsid "$VENV" "$APP/server.py" > "$LOGS/server.log" 2>&1 < /dev/null &
@@ -136,7 +150,7 @@ EOF
 
     if command -v cloudflared >/dev/null 2>&1; then
       rm -f "$EXPORT/public-url.txt" "$STATE/url" 2>/dev/null || true
-      pkill -f 'cloudflared tunnel' 2>/dev/null || true
+      kill_matching 'cloudflared tunnel' || true
       setsid cloudflared tunnel --no-autoupdate \
         --protocol http2 --edge-ip-version 4 \
         --url http://127.0.0.1:8080 > "$LOGS/cloudflared.log" 2>&1 < /dev/null &
@@ -163,12 +177,8 @@ EOF
     ;;
 
   stop)
-    pkill -f 'photo-drop/server.py' 2>/dev/null
-    sleep 0.3
-    pkill -9 -f 'photo-drop/server.py' 2>/dev/null
-    pkill -f 'cloudflared' 2>/dev/null
-    sleep 0.3
-    pkill -9 -f 'cloudflared' 2>/dev/null
+    ensure_dead 'photo-drop/server.py'
+    ensure_dead 'cloudflared tunnel'
     stop_watchdog
     sleep 0.5
     termux-wake-unlock 2>/dev/null || true

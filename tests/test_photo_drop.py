@@ -294,10 +294,13 @@ def test_xss_regression_filenames_escaped(client):
         "</span></li></ul><script>alert(1)</script>.jpg",
     ]
 
-    # PAGE_DONE is static markup with no script, img or svg of its own, so any
-    # of these appearing means a payload broke out of its text context.
+    # PAGE_DONE is static markup: it renders an inline <svg> tick icon and a
+    # "Send More" <a>, but no <script> or <img> of its own. Any other tag
+    # appearing — or an <img>/<a> pointing elsewhere — means a payload broke
+    # out of its text context.
     allowed = {"html", "head", "meta", "title", "style", "body", "div", "h1",
-               "h2", "p", "ul", "li", "span", "b", "strong", "em", "i"}
+               "h2", "p", "ul", "li", "span", "b", "strong", "em", "i", "br",
+               "svg", "polyline"}
 
     for i, payload in enumerate(payloads):
         batch = f"b{i:x}" + "0" * 10
@@ -312,14 +315,19 @@ def test_xss_regression_filenames_escaped(client):
         html = client.get(f"/d/{token}/done/{batch}").get_data(as_text=True)
 
         # The real assertion: no element from a payload was created.
-        # PAGE_DONE legitimately renders <img> thumbnails, so img is allowed
-        # only if its src points at our own sanitised file route.
+        # PAGE_DONE legitimately renders <img> thumbnails and one "Send More"
+        # <a>, so those are allowed only if they point at our own routes.
         for tag, attrs in _parse_tags(html):
             t = tag.lower()
             if t == "img":
                 src = dict(attrs).get("src", "")
                 assert src.startswith(f"/d/{token}/file/"), (
                     f"payload {payload!r} injected an <img> with src={src!r}"
+                )
+            elif t == "a":
+                href = dict(attrs).get("href", "")
+                assert href.startswith(f"/d/{token}/"), (
+                    f"payload {payload!r} injected an <a> with href={href!r}"
                 )
             else:
                 assert t in allowed, f"payload {payload!r} created live tag <{t}>"
@@ -664,3 +672,146 @@ def test_root_does_not_accept_a_query_token(client):
 
     r2 = client.get("/", query_string={"owner": server.OWNER_TOKEN})
     assert "Location" not in r2.headers
+
+
+# ---------------------------------------------------------------------------
+# live sessions and the in-app owner dashboard
+# ---------------------------------------------------------------------------
+
+
+def test_owner_state_requires_the_owner_token(client):
+    import server
+
+    assert client.get("/owner/api/state").status_code == 404
+    assert client.get("/owner/deadbeefdeadbeef/api/state").status_code == 404
+    assert client.get(f"/owner/{server.OWNER_TOKEN}").status_code == 200
+
+
+def test_owner_state_reports_a_real_session_and_upload(client):
+    """The dashboard must show the guest, not an anonymous batch directory."""
+    import server
+
+    ua = ("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) "
+          "AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1")
+    client.get(f"/d/{server.TOKEN}/", headers={"User-Agent": ua})
+    body = b"beach photo" * 512
+    r = client.post(
+        f"/d/{server.TOKEN}/upload",
+        data=body,
+        query_string={"name": "beach.jpg"},
+        content_type="application/octet-stream",
+        headers={"User-Agent": ua, "CF-Connecting-IP": "203.0.113.7"},
+    )
+    assert r.status_code == 200
+
+    state = client.get(f"/owner/{server.OWNER_TOKEN}/api/state").get_json()
+    assert state["ok"] is True
+    assert state["totals"]["files"] == 1
+    assert state["totals"]["bytes"] == len(body)
+    assert len(state["sessions"]) == 1
+
+    session = state["sessions"][0]
+    assert session["label"].startswith("iPhone")
+    assert session["ip"] == "203.0.113.7"
+    assert session["files"] == 1
+    assert session["bytes"] == len(body)
+    assert session["last_file"] == "beach.jpg"
+    assert any(f["name"] == "beach.jpg" for f in session["recent"])
+    assert any(f["name"] == "beach.jpg" for f in state["recent"])
+    assert len(session["id"]) == 6
+
+
+def test_owner_dashboard_is_the_live_console(client):
+    import server
+
+    html = client.get(f"/owner/{server.OWNER_TOKEN}").get_data(as_text=True)
+    assert "Live sessions" in html
+    assert "Recent uploads" in html
+    assert "/api/state" in html
+    assert "Clear temp cache" in html
+    # The page must render its own initial state instead of flashing empty.
+    assert '"totals"' in html
+
+
+def test_guest_pages_and_healthz_never_leak_the_owner_token(client):
+    import json
+    import server
+
+    drop = client.get(f"/d/{server.TOKEN}/").get_data(as_text=True)
+    assert server.OWNER_TOKEN not in drop
+    health = client.get("/healthz", headers={"X-PD-Token": server.TOKEN}).get_json()
+    assert server.OWNER_TOKEN not in json.dumps(health)
+    assert "owner" not in json.dumps(health).lower()
+
+
+def test_owner_clear_parts_spares_fresh_uploads(client):
+    import time
+    import server
+
+    old = server.DEST / ".old.jpg.part"
+    old.write_bytes(b"old" * 100)
+    os.utime(old, (time.time() - 900, time.time() - 900))
+    fresh = server.DEST / ".fresh.jpg.part"
+    fresh.write_bytes(b"fresh")
+
+    r = client.post(f"/owner/{server.OWNER_TOKEN}/api/clear-parts")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["removed"] == 1
+    assert body["skipped"] == 1
+    assert not old.exists(), "stale .part file was not removed"
+    assert fresh.exists(), "an in-progress .part file was deleted"
+
+
+def test_owner_diagnostics_requires_auth_and_returns_state(client):
+    import server
+
+    assert client.get("/owner/api/diagnostics").status_code == 404
+    r = client.get(f"/owner/{server.OWNER_TOKEN}/api/diagnostics")
+    assert r.status_code == 200
+    payload = r.get_json()
+    assert payload["state"]["ok"] is True
+    assert "media_scan_selftest" in payload
+    assert "log_tail" in payload
+
+
+def test_healthz_session_count_includes_a_connected_guest(client):
+    """Opening the link is a session even before the first file lands."""
+    import server
+
+    client.get(f"/d/{server.TOKEN}/")
+    health = client.get("/healthz", headers={"X-PD-Token": server.TOKEN}).get_json()
+    assert health["sessions"] == 1
+    assert health["active_sessions"] == 0
+    assert health["upload_stats"]["uploading"] is False
+
+
+
+def test_owner_keeps_device_identity_across_a_restart(client):
+    """A restart loses in-memory JS but must not turn guests into 'Browser'."""
+    import server
+
+    ua = ("Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36")
+    client.get(
+        f"/d/{server.TOKEN}/",
+        headers={"User-Agent": ua, "CF-Connecting-IP": "198.51.100.9"},
+    )
+    client.post(
+        f"/d/{server.TOKEN}/upload",
+        data=b"restart photo",
+        query_string={"name": "restart.jpg"},
+        content_type="application/octet-stream",
+        headers={"User-Agent": ua, "CF-Connecting-IP": "198.51.100.9"},
+    )
+
+    # Simulate a fresh process: the in-memory map is empty, disk is not.
+    server._SESSION_META.clear()
+    server._ACTIVE_TRANSFERS.clear()
+
+    state = client.get(f"/owner/{server.OWNER_TOKEN}/api/state").get_json()
+    assert len(state["sessions"]) == 1
+    session = state["sessions"][0]
+    assert session["label"].startswith("Android")
+    assert session["ip"] == "198.51.100.9"
+    assert session["files"] == 1

@@ -31,12 +31,20 @@ def configure_env(tmp_path_factory):
 @pytest.fixture(autouse=True)
 def ensure_dirs(tmp_path):
     # Ensure DEST/home exist by importing after env is set
+    import server
     from server import DEST, HOME, BATCHES, LOGS
 
     DEST.mkdir(parents=True, exist_ok=True)
     HOME.mkdir(parents=True, exist_ok=True)
     BATCHES.mkdir(parents=True, exist_ok=True)
     LOGS.mkdir(parents=True, exist_ok=True)
+    # Live state is process-global; a test that uploads must not leak a
+    # session into the next test's owner-dashboard assertions.
+    server._ACTIVE_TRANSFERS.clear()
+    server._RECENT_UPLOADS.clear()
+    server._SESSION_META.clear()
+    server.SESSIONS.unlink(missing_ok=True)
+    server.SESSION_META_FILE.unlink(missing_ok=True)
     # Clean stale parts
     for p in list(DEST.glob(".*.part")):
         p.unlink(missing_ok=True)

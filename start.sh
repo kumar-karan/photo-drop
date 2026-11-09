@@ -13,6 +13,20 @@ LOGDIR="$HOME/.photo-drop/logs"
 WANT_TUNNEL=0
 [[ "${1:-}" == "--tunnel" ]] && WANT_TUNNEL=1
 
+# Shared /proc process helpers (ensure_dead, kill_matching, ...).
+# The fallback keeps a relocated checkout working during upgrades.
+for _lib in "$DIR/lib.sh" "$HOME/photo-drop/lib.sh" "/sdcard/photo-drop/lib.sh"; do
+  if [[ -f "$_lib" ]]; then
+    # shellcheck disable=SC1090
+    . "$_lib"
+    break
+  fi
+done
+if ! command -v ensure_dead >/dev/null 2>&1; then
+  echo "lib.sh is missing next to start.sh — copy the whole photo-drop directory." >&2
+  exit 1
+fi
+
 mkdir -p "$HOME/.photo-drop" "$LOGDIR"
 
 if [[ ! -f "$ENVFILE" ]]; then
@@ -37,9 +51,8 @@ PY="python"
 termux-wake-lock 2>/dev/null || true
 
 # --- stop anything left over from a previous run ----------------------------
-pkill -f 'photo-drop/server.py' 2>/dev/null
-pkill -f 'cloudflared tunnel'    2>/dev/null
-sleep 1
+ensure_dead 'photo-drop/server.py'
+ensure_dead 'cloudflared tunnel'
 
 # --- the server ------------------------------------------------------------
 "$PY" "$DIR/server.py" >>"$LOGDIR/server.log" 2>&1 &

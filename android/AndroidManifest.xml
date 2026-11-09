@@ -30,6 +30,11 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".OwnerActivity"
+            android:exported="false"
+            android:launchMode="singleTop" />
+
         <service
             android:name=".PhotoDropService"
             android:exported="false"

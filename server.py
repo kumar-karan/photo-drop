@@ -38,6 +38,8 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from string import Template
+from urllib.parse import quote
 
 from markupsafe import escape
 
@@ -91,45 +93,232 @@ MAX_FILES_PER_SESSION = int(os.environ.get("PHOTO_DROP_MAX_FILES", "500"))
 MAX_CONCURRENT_UPLOADS = int(os.environ.get("PHOTO_DROP_MAX_CONCURRENT", "3"))
 _UPLOAD_SLOTS = threading.BoundedSemaphore(max(1, MAX_CONCURRENT_UPLOADS))
 
+# How long a session cookie stays valid.
+SESSION_TTL = int(os.environ.get("PHOTO_DROP_SESSION_TTL", str(12 * 3600)))
+
+APP_VERSION = "1.6.0"
+STARTED_AT = time.time()
+
 _ACTIVE_LOCK = threading.Lock()
 _ACTIVE_TRANSFERS = {}
 _RECENT_UPLOADS = []
+_SESSION_META = {}
+
+# Keep the in-memory journal bounded. A phone that runs for weeks should not
+# accumulate one record per upload forever.
+MAX_RECENT_UPLOADS = 200
+MAX_SESSION_META = 500
+LIVE_STATE_WINDOW = int(os.environ.get("PHOTO_DROP_LIVE_WINDOW", str(6 * 3600)))
+
+
+def _iso(ts: float) -> str:
+    return datetime.fromtimestamp(ts, timezone.utc).isoformat(timespec="seconds")
+
+
+def _age(ts: float, now: float | None = None) -> int:
+    return max(0, int((now or time.time()) - ts))
+
+
+def client_ip() -> str:
+    """Best-effort client address, aware of the Cloudflare tunnel.
+
+    Behind cloudflared every request reaches Flask from 127.0.0.1, so
+    remote_addr alone would show every guest as "localhost". CF-Connecting-IP
+    is set by Cloudflare; X-Forwarded-For covers the fallback path.
+    """
+    cf = (request.headers.get("CF-Connecting-IP") or "").strip()
+    if cf:
+        return cf
+    forwarded = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+    if forwarded:
+        return forwarded
+    return request.remote_addr or ""
+
+
+def device_label(ua: str) -> str:
+    """Turn a User-Agent into something a human can scan in one second."""
+    text = (ua or "").lower()
+    if "iphone" in text:
+        device = "iPhone"
+    elif "ipad" in text:
+        device = "iPad"
+    elif "android" in text:
+        device = "Android"
+    elif "macintosh" in text or "mac os x" in text:
+        device = "Mac"
+    elif "windows" in text:
+        device = "Windows"
+    elif "linux" in text:
+        device = "Linux"
+    else:
+        device = "Browser"
+
+    if "edg/" in text:
+        browser = "Edge"
+    elif "opr/" in text or "opera" in text:
+        browser = "Opera"
+    elif "firefox" in text:
+        browser = "Firefox"
+    elif "chrome" in text or "crios" in text:
+        browser = "Chrome"
+    elif "safari" in text:
+        browser = "Safari"
+    else:
+        browser = "Browser"
+
+    return f"{device} · {browser}"
+
+
+def note_session(sid: str, created: float | None = None):
+    """Remember who is behind a session and when they were last seen.
+
+    Called on every authenticated drop request. The uploader page polls
+    /status every few seconds, so last_seen is a real presence signal rather
+    than a guess from batch mtimes.
+    """
+    if not sid:
+        return
+    now = time.time()
+    is_new = False
+    with _ACTIVE_LOCK:
+        meta = _SESSION_META.get(sid)
+        if meta is None:
+            meta = {
+                "created": created or now,
+                "last_seen": now,
+                "ip": "",
+                "ua": "",
+                "label": "Browser",
+            }
+            _SESSION_META[sid] = meta
+            is_new = True
+        meta["last_seen"] = now
+        if created and created < meta.get("created", now):
+            meta["created"] = created
+        try:
+            ip = client_ip()
+            loopback = {"127.0.0.1", "::1"}
+            # Prefer a real client address; only keep loopback if that is all
+            # we have ever seen for this session.
+            if ip and (not meta.get("ip") or meta["ip"] in loopback or ip not in loopback):
+                meta["ip"] = ip
+            ua = request.headers.get("User-Agent", "")
+            if ua:
+                label = device_label(ua)
+                # A test client or a stripped header must not replace a real
+                # device label with the generic fallback.
+                if label != "Browser · Browser" or meta.get("label") in {None, "", "Browser"}:
+                    meta["ua"] = ua[:300]
+                    meta["label"] = label
+        except RuntimeError:
+            # No request context (disk reconstruction); keep what we have.
+            pass
+        if len(_SESSION_META) > MAX_SESSION_META:
+            cutoff = now - SESSION_TTL
+            stale = [k for k, v in _SESSION_META.items() if v.get("last_seen", 0) < cutoff]
+            overflow = len(_SESSION_META) - MAX_SESSION_META
+            if not stale:
+                # Everything is fresh (a burst of guests). Evict the least
+                # recently seen so the map still cannot grow without bound.
+                stale = [k for k, _ in sorted(
+                    _SESSION_META.items(), key=lambda item: item[1].get("last_seen", 0),
+                )[:overflow]]
+            for key in stale[:overflow]:
+                _SESSION_META.pop(key, None)
+
+    if is_new:
+        # Persist outside the lock. The file is tiny, but the first request of
+        # a session should not stall upload-progress reporting on disk I/O.
+        _remember_session_meta(sid, dict(meta))
+
+
+def start_transfer(sid: str, bid: str, name: str, size: int) -> str:
+    transfer_id = uuid.uuid4().hex[:8]
+    now = time.time()
+    with _ACTIVE_LOCK:
+        _ACTIVE_TRANSFERS[transfer_id] = {
+            "id": transfer_id,
+            "sid": sid,
+            "bid": bid,
+            "name": name,
+            "size": int(size or 0),
+            "written": 0,
+            "started": now,
+            "updated": now,
+        }
+    return transfer_id
+
+
+def update_transfer(transfer_id: str, written: int):
+    """Publish byte progress while a file is still being written.
+
+    This is what makes the owner dashboard live. Without it the server only
+    knows a transfer exists, not how far it has got, so the panel would sit at
+    0% until the file was finished.
+    """
+    with _ACTIVE_LOCK:
+        transfer = _ACTIVE_TRANSFERS.get(transfer_id)
+        if transfer is not None:
+            transfer["written"] = int(written)
+            transfer["updated"] = time.time()
+
+
+def finish_transfer(transfer_id: str, ok: bool):
+    with _ACTIVE_LOCK:
+        transfer = _ACTIVE_TRANSFERS.pop(transfer_id, None)
+        if transfer and ok and transfer.get("written", 0) > 0:
+            _RECENT_UPLOADS.append({
+                "sid": transfer["sid"],
+                "bid": transfer["bid"],
+                "name": transfer["name"],
+                "size": transfer["written"],
+                "finished": time.time(),
+            })
+            if len(_RECENT_UPLOADS) > MAX_RECENT_UPLOADS:
+                del _RECENT_UPLOADS[: len(_RECENT_UPLOADS) - MAX_RECENT_UPLOADS]
 
 
 def get_active_upload_stats():
     with _ACTIVE_LOCK:
         now = time.time()
-        # Prune recent records older than 45s
-        _RECENT_UPLOADS[:] = [u for u in _RECENT_UPLOADS if (now - u["finished"]) < 45]
+        # Keep a short tail for the uploader-side "recently received" chip, but
+        # do not let the list grow without bound.
+        _RECENT_UPLOADS[:] = [u for u in _RECENT_UPLOADS if (now - u["finished"]) < 300]
 
-        in_flight = list(_ACTIVE_TRANSFERS.values())
-        recent = list(_RECENT_UPLOADS)
+        in_flight = [dict(t) for t in _ACTIVE_TRANSFERS.values()]
+        recent = [dict(u) for u in _RECENT_UPLOADS]
 
-        active_sids = {u["sid"] for u in in_flight}
-        recent_sids = {u["sid"] for u in recent if (now - u["finished"]) < 30}
-        all_sids = active_sids | recent_sids
+    active_sids = {u["sid"] for u in in_flight}
+    recent_sids = {u["sid"] for u in recent if (now - u["finished"]) < 30}
+    uploaders = len(active_sids | recent_sids)
+    is_uploading = len(in_flight) > 0
+    is_active = is_uploading or len(recent) > 0
+    if uploaders == 0 and is_active:
+        uploaders = 1
 
-        uploaders = len(all_sids)
-        is_uploading = len(in_flight) > 0
-        is_active = is_uploading or len(recent) > 0
-        if uploaders == 0 and is_active:
-            uploaders = 1
+    in_flight_names = [u["name"] for u in in_flight]
+    recent_names = [u["name"] for u in recent if u["name"] not in in_flight_names]
 
-        in_flight_names = [u["name"] for u in in_flight]
-        recent_names = [u["name"] for u in recent if u["name"] not in in_flight_names]
+    return {
+        "uploading": is_uploading,
+        "active": is_active,
+        "uploaders": uploaders,
+        "in_flight_count": len(in_flight),
+        "in_flight_files": in_flight_names,
+        "in_flight": [
+            {
+                "name": u["name"],
+                "size": u["size"],
+                "written": u["written"],
+                "pct": round(100 * u["written"] / u["size"]) if u["size"] else 0,
+                "session": u["sid"][:6],
+            }
+            for u in in_flight
+        ],
+        "recent_count": len(recent),
+        "recent_files": recent_names,
+    }
 
-        return {
-            "uploading": is_uploading,
-            "active": is_active,
-            "uploaders": uploaders,
-            "in_flight_count": len(in_flight),
-            "in_flight_files": in_flight_names,
-            "recent_count": len(recent),
-            "recent_files": recent_names,
-        }
-
-# How long a session cookie stays valid.
-SESSION_TTL = int(os.environ.get("PHOTO_DROP_SESSION_TTL", str(12 * 3600)))
 
 COOKIE = "pd_session"
 MEDIA_SCAN = str(Path(__file__).with_name("media_scan.sh"))
@@ -224,6 +413,22 @@ def get_public_url() -> str:
             except Exception:
                 pass
     return ""
+
+
+def share_url() -> str:
+    """The link to hand a guest.
+
+    When the app shows the dashboard over loopback, request.host_url is
+    `http://127.0.0.1:8080` — useless to a friend. Prefer the live tunnel,
+    then the LAN address, and only fall back to the request host.
+    """
+    public = get_public_url()
+    if public:
+        return public.rstrip("/") + f"/d/{TOKEN}/"
+    lan = get_lan_ip()
+    if lan and lan != "127.0.0.1":
+        return f"http://{lan}:{PORT}/d/{TOKEN}/"
+    return request.host_url.rstrip("/") + f"/d/{TOKEN}/"
 
 
 def unique_name(raw: str, folder: Path) -> str:
@@ -324,6 +529,11 @@ def check_token(candidate: str, expected: str) -> bool:
 SESSIONS = HOME / "sessions.json"
 SESSION_LOCK = threading.Lock()
 
+# Device identity for a session, kept beside the cookie store so a restart
+# does not turn every known guest back into "Browser". This is advisory data
+# (User-Agent and IP), never authentication.
+SESSION_META_FILE = HOME / "session-meta.json"
+
 # Upper bound on the store so a long-running phone can't grow it forever.
 MAX_SESSIONS = 200
 
@@ -344,6 +554,41 @@ def _save_sessions(data: dict):
     tmp.replace(SESSIONS)
 
 
+def _load_session_meta() -> dict:
+    try:
+        data = json.loads(SESSION_META_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _remember_session_meta(sid: str, meta: dict):
+    """Persist the label/IP for one session, pruned to the live window."""
+    now = time.time()
+    cutoff = now - SESSION_TTL
+    with SESSION_LOCK:
+        data = {
+            key: value for key, value in _load_session_meta().items()
+            if isinstance(value, dict) and value.get("last_seen", 0) >= cutoff
+        }
+        data[sid] = {
+            "created": meta.get("created", now),
+            "last_seen": meta.get("last_seen", now),
+            "ip": meta.get("ip", ""),
+            "label": meta.get("label", "Browser"),
+        }
+        if len(data) > MAX_SESSION_META:
+            newest = sorted(data.items(), key=lambda item: item[1].get("last_seen", 0))
+            data = dict(newest[-MAX_SESSION_META:])
+        try:
+            tmp = SESSION_META_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data))
+            tmp.replace(SESSION_META_FILE)
+        except OSError as exc:
+            log(f"could not persist session meta: {exc}")
+
+
+
 def session_valid(sid: str) -> bool:
     if not sid or len(sid) < 16:
         return False
@@ -357,6 +602,11 @@ def session_valid(sid: str) -> bool:
             _save_sessions(s)
             return False
         return True
+
+
+def valid_session(sid: str) -> bool:
+    """Back-compat alias kept for older callers/tests."""
+    return session_valid(sid)
 
 
 def register_session(sid: str):
@@ -384,6 +634,7 @@ def require_drop_token() -> tuple[str, bool]:
     """
     sid = session_id()
     if session_valid(sid):
+        note_session(sid)
         return sid, False
 
     candidate = request.view_args.get("token", "") if request.view_args else ""
@@ -392,6 +643,7 @@ def require_drop_token() -> tuple[str, bool]:
     if candidate and check_token(candidate, TOKEN):
         sid = new_session()
         register_session(sid)
+        note_session(sid)
         return sid, True
 
     abort(404)
@@ -489,6 +741,288 @@ def session_file_count(sid: str) -> int:
 
 
 # --------------------------------------------------------------------------
+# live sessions
+# --------------------------------------------------------------------------
+
+
+def _new_session_record(sid: str, now: float) -> dict:
+    return {
+        "sid": sid,
+        "created": now,
+        "last_seen": now,
+        "last_at": 0.0,
+        "ip": "",
+        "label": "Browser",
+        "batches": set(),
+        "files": 0,
+        "bytes": 0,
+        "recent_files": [],
+        "last_file": "",
+        "active": [],
+        "connected": False,
+    }
+
+
+def collect_sessions(now: float | None = None) -> list[dict]:
+    """Merge cookie sessions, batch manifests and live transfers into one view.
+
+    Three sources, deliberately:
+
+    * sessions.json says who has a valid cookie, so a guest who just opened the
+      link appears before they upload anything.
+    * batch manifests are the durable record, so the dashboard survives a
+      server restart.
+    * the in-memory transfer map is the only place byte progress exists.
+
+    Reading the manifests once per dashboard poll is cheap: a phone drop has
+    tens of batches, not thousands.
+    """
+    now = now or time.time()
+    cutoff = now - SESSION_TTL
+    records: dict[str, dict] = {}
+
+    def rec(sid: str) -> dict:
+        record = records.get(sid)
+        if record is None:
+            record = _new_session_record(sid, now)
+            records[sid] = record
+        return record
+
+    if BATCHES.exists():
+        for d in BATCHES.iterdir():
+            try:
+                if not d.is_dir():
+                    continue
+                mtime = d.stat().st_mtime
+            except OSError:
+                continue
+            if mtime < cutoff:
+                continue
+            try:
+                sid = (d / "owner").read_text().strip()
+            except OSError:
+                sid = ""
+            if not sid:
+                sid = f"anon-{d.name[:6]}"
+            record = rec(sid)
+            record["batches"].add(d.name)
+            rows = batch_files(d.name)
+            record["files"] += len(rows)
+            record["bytes"] += sum(int(f.get("size") or 0) for f in rows)
+            record["last_seen"] = max(record["last_seen"], mtime)
+            record["last_at"] = max(record["last_at"], mtime)
+            if rows:
+                record["last_file"] = rows[-1].get("original") or rows[-1].get("name") or ""
+                for f in rows[-5:]:
+                    record["recent_files"].append({
+                        "name": f.get("original") or f.get("name") or "file",
+                        "size": int(f.get("size") or 0),
+                        "at": f.get("at") or _iso(mtime),
+                        "ts": mtime,
+                    })
+
+    with SESSION_LOCK:
+        stored = _load_sessions()
+    for sid, created in stored.items():
+        if not sid or created < cutoff:
+            continue
+        record = rec(sid)
+        record["created"] = min(record["created"], created)
+        record["last_seen"] = max(record["last_seen"], created)
+        record["connected"] = True
+
+    with _ACTIVE_LOCK:
+        meta_items = {sid: dict(v) for sid, v in _SESSION_META.items() if v.get("last_seen", 0) >= cutoff}
+        transfers = [dict(t) for t in _ACTIVE_TRANSFERS.values()]
+
+    # After a restart memory is empty but the last-known identity is on disk.
+    # Use it only for sessions memory does not know about, so live values win.
+    for sid, meta in _load_session_meta().items():
+        if not sid or sid in meta_items or meta.get("last_seen", 0) < cutoff:
+            continue
+        meta_items[sid] = meta
+
+    for sid, meta in meta_items.items():
+        record = rec(sid)
+        record["created"] = min(record["created"], meta.get("created", record["created"]))
+        record["last_seen"] = max(record["last_seen"], meta.get("last_seen", 0))
+        if meta.get("ip"):
+            record["ip"] = meta["ip"]
+        if meta.get("label"):
+            record["label"] = meta["label"]
+        # A presence heartbeat is stronger evidence than a cookie issued hours
+        # ago: the uploader page polls /status while it is open.
+        if now - meta.get("last_seen", 0) < 45:
+            record["connected"] = True
+
+    for transfer in transfers:
+        record = rec(transfer["sid"])
+        size = int(transfer.get("size") or 0)
+        written = int(transfer.get("written") or 0)
+        elapsed = max(0.25, now - transfer.get("started", now))
+        record["active"].append({
+            "name": transfer.get("name") or "file",
+            "size": size,
+            "size_human": human(size),
+            "written": written,
+            "written_human": human(written),
+            "pct": min(100, round(100 * written / size)) if size else 0,
+            "bps": int(written / elapsed) if written else 0,
+            "bps_human": f"{human(int(written / elapsed))}/s" if written else "",
+            "started_age": _age(transfer.get("started", now), now),
+        })
+        record["last_seen"] = max(record["last_seen"], transfer.get("updated", now))
+        record["last_at"] = max(record["last_at"], transfer.get("updated", now))
+        record["last_file"] = transfer.get("name") or record["last_file"]
+
+    sessions = []
+    for record in records.values():
+        if not (record["connected"] or record["files"] or record["active"]):
+            continue
+        if record["active"]:
+            state = "uploading"
+        elif record["last_at"] and now - record["last_at"] < 60:
+            state = "recent"
+        elif record["connected"]:
+            state = "connected"
+        else:
+            state = "idle"
+
+        recent = sorted(record["recent_files"], key=lambda f: f.get("ts", 0))[-5:]
+        sessions.append({
+            "id": record["sid"][:6],
+            "label": record["label"] or "Browser",
+            "ip": record["ip"],
+            "state": state,
+            "connected": record["connected"],
+            "created": _iso(record["created"]),
+            "created_age": _age(record["created"], now),
+            "last_seen": _iso(record["last_seen"]),
+            "last_seen_age": _age(record["last_seen"], now),
+            "files": record["files"],
+            "bytes": record["bytes"],
+            "bytes_human": human(record["bytes"]),
+            "batches": sorted(record["batches"]),
+            "active": record["active"],
+            "recent": [
+                {
+                    "name": f.get("name") or "file",
+                    "size": f.get("size") or 0,
+                    "size_human": human(f.get("size") or 0),
+                    "at": f.get("at") or "",
+                    "ts": f.get("ts") or 0,
+                }
+                for f in recent
+            ],
+            "last_file": record["last_file"],
+            "last_activity_age": _age(record["last_at"], now) if record["last_at"] else None,
+        })
+
+    def sort_key(s: dict):
+        if s["state"] == "uploading":
+            return (0, s["last_seen_age"])
+        if s["state"] == "recent":
+            return (1, s["last_seen_age"])
+        if s["state"] == "connected":
+            return (2, s["last_seen_age"])
+        return (3, s["last_seen_age"])
+
+    sessions.sort(key=sort_key)
+    return sessions
+
+
+def build_owner_state() -> dict:
+    now = time.time()
+    all_sessions = collect_sessions(now)
+    # The console is polled about once a second; 20 cards is plenty to look at
+    # and keeps the payload small during a party. Totals still cover everyone.
+    sessions = all_sessions[:20]
+    free = disk_free()
+    total = disk_total()
+    used = max(0, total - free) if total else 0
+    stats = get_active_upload_stats()
+    files = sum(s["files"] for s in all_sessions)
+    uploaded_bytes = sum(s["bytes"] for s in all_sessions)
+    recent = []
+    for s in all_sessions:
+        for f in s["recent"]:
+            recent.append({
+                "name": f["name"],
+                "size": f["size"],
+                "size_human": f["size_human"],
+                "at": f["at"],
+                "age": _age(f["ts"], now) if f.get("ts") else None,
+                "session": s["id"],
+                "label": s["label"],
+            })
+    recent.sort(key=lambda f: f["at"], reverse=True)
+
+    return {
+        "ok": True,
+        "version": APP_VERSION,
+        "now": _iso(now),
+        "uptime_seconds": int(now - STARTED_AT),
+        "uptime_human": _duration(int(now - STARTED_AT)),
+        "server": {
+            "pid": os.getpid(),
+            "host": HOST,
+            "port": PORT,
+        },
+        "storage": {
+            "dest": str(DEST),
+            "free": free,
+            "free_human": human(free),
+            "total": total,
+            "total_human": human(total) if total else "unknown",
+            "used": used,
+            "used_human": human(used) if total else "unknown",
+            "reserve": RESERVE_BYTES,
+            "reserve_human": human(RESERVE_BYTES),
+            "low": free <= RESERVE_BYTES,
+            "free_pct": round(100 * free / total) if total else 0,
+        },
+        "network": {
+            "public_url": get_public_url(),
+            "lan_ip": get_lan_ip(),
+        },
+        "limits": {
+            "max_file_bytes": MAX_FILE_BYTES,
+            "max_file_human": human(MAX_FILE_BYTES),
+            "max_files": MAX_FILES_PER_SESSION,
+            "max_concurrent": MAX_CONCURRENT_UPLOADS,
+        },
+        "totals": {
+            "sessions": len(all_sessions),
+            "shown_sessions": len(sessions),
+            "uploading_sessions": len({s["id"] for s in all_sessions if s["state"] == "uploading"}),
+            "connected_sessions": len([s for s in all_sessions if s["connected"]]),
+            "files": files,
+            "bytes": uploaded_bytes,
+            "bytes_human": human(uploaded_bytes),
+            "in_flight": stats["in_flight_count"],
+            "uploaders": stats["uploaders"],
+        },
+        "sessions": sessions,
+        "recent": recent[:12],
+    }
+
+
+def _duration(seconds: int) -> str:
+    seconds = max(0, int(seconds))
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+
+# --------------------------------------------------------------------------
 # media scan
 # --------------------------------------------------------------------------
 
@@ -517,6 +1051,45 @@ def scan_media(paths: list[str]) -> str:
     return detail[-1].split(":")[0].removeprefix("scanned(") if detail else "unknown"
 
 
+_SCAN_SELFTEST = {"at": 0.0, "text": ""}
+
+
+def media_scan_selftest(force: bool = False) -> str:
+    """Cache the capability probe; it shells out and is not cheap."""
+    now = time.time()
+    if not force and _SCAN_SELFTEST["text"] and now - _SCAN_SELFTEST["at"] < 300:
+        return _SCAN_SELFTEST["text"]
+    try:
+        proc = subprocess.run(
+            ["bash", MEDIA_SCAN, "--selftest"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        text = (proc.stdout or proc.stderr or "").strip()
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        text = f"selftest unavailable: {exc}"
+    _SCAN_SELFTEST["at"] = now
+    _SCAN_SELFTEST["text"] = text
+    return text
+
+
+@app.after_request
+def _security_headers(resp):
+    """Cheap hardening that applies to every response, HTML or JSON."""
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    return resp
+
+
+def html_page(body: str, status: int = 200):
+    resp = make_response(body, status)
+    resp.headers["Content-Type"] = "text/html; charset=utf-8"
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+
 # --------------------------------------------------------------------------
 # routes
 # --------------------------------------------------------------------------
@@ -531,33 +1104,54 @@ def root():
     access log on its way to becoming a path token. Useless convenience, real
     leak.
     """
-    return PAGE_INDEX, 200, {"Content-Type": "text/html; charset=utf-8"}
+    return html_page(PAGE_INDEX)
+
+
+def _is_direct_loopback() -> bool:
+    """True only for a direct connection to the phone, not via the tunnel.
+
+    cloudflared connects to 127.0.0.1 locally, so public internet traffic
+    arrives with remote_addr == 127.0.0.1 too. remote_addr alone cannot
+    distinguish the two. The tunnel sets X-Forwarded-* headers; a direct
+    on-phone dial does not. Only trust loopback when no proxy headers exist.
+    """
+    if (request.headers.get("X-Forwarded-For")
+            or request.headers.get("X-Forwarded-Host")
+            or request.headers.get("X-Forwarded-Proto")):
+        return False
+    return request.remote_addr in {"127.0.0.1", "::1", "localhost"}
 
 
 @app.get("/healthz")
 def healthz():
     """Liveness probe.
 
-    start.sh polls this over loopback, but the same endpoint is reachable from
-    the tunnel. Authenticated or loopback callers get full diagnostics.
+    start.sh polls this over loopback with the drop token, and the same
+    endpoint is reachable from the tunnel. Full diagnostics require a token:
+    loopback alone is NOT trusted here, because tunnel traffic also arrives
+    from 127.0.0.1. Unauthenticated callers get bare {"ok": true} — enough
+    for a liveness check, nothing more.
     """
     drop = request.headers.get("X-PD-Token", "")
     owner = request.args.get("k", "") or request.args.get("owner", "")
-    is_local = request.remote_addr in {"127.0.0.1", "::1"}
 
-    if is_local or check_token(drop, TOKEN) or (OWNER_OK and check_token(owner, OWNER_TOKEN)):
+    if check_token(drop, TOKEN) or (OWNER_OK and check_token(owner, OWNER_TOKEN)):
         free = disk_free()
         total = disk_total()
         stats = get_active_upload_stats()
+        sessions = collect_sessions()
         return jsonify(
             ok=True,
+            version=APP_VERSION,
+            uptime=_age(STARTED_AT),
             dest=str(DEST),
             free=free,
             dest_size=total,
             used=max(0, total - free),
             reserve=RESERVE_BYTES,
-            sessions=stats["uploaders"] if stats["active"] else len(batch_ids_active()),
-            total_sessions=len(batch_ids_recent()),
+            sessions=len(sessions),
+            total_sessions=len(sessions),
+            active_sessions=len([s for s in sessions if s["state"] in {"uploading", "recent"}]),
             public_url=get_public_url(),
             lan_ip=get_lan_ip(),
             upload_stats=stats,
@@ -565,35 +1159,37 @@ def healthz():
     return jsonify(ok=True)
 
 
-def batch_ids_active() -> set[str]:
-    """Batches with file modifications within the last 120 seconds."""
-    if not BATCHES.exists():
-        return set()
-    cutoff = time.time() - 120
-    return {p.name for p in BATCHES.iterdir() if p.is_dir() and p.stat().st_mtime > cutoff}
-
-
-def batch_ids_recent() -> set[str]:
-    if not BATCHES.exists():
-        return set()
-    cutoff = time.time() - SESSION_TTL
-    return {p.name for p in BATCHES.iterdir() if p.is_dir() and p.stat().st_mtime > cutoff}
-
-
 @app.route("/api/stop", methods=["GET", "POST"])
 @app.route("/stop", methods=["GET", "POST"])
 def stop_endpoint():
     drop = request.headers.get("X-PD-Token", "") or request.args.get("token", "")
     owner = request.args.get("k", "") or request.args.get("owner", "")
-    is_local = request.remote_addr in {"127.0.0.1", "::1", "localhost"}
+    # Direct on-phone loopback only (no tunnel proxy headers) may stop
+    # unauthenticated — the foreground service's shutdown path relies on it.
+    # Anyone arriving through cloudflared carries X-Forwarded-* and needs a token.
+    is_local = _is_direct_loopback()
 
     if not (is_local or check_token(drop, TOKEN) or (OWNER_OK and check_token(owner, OWNER_TOKEN))):
         abort(403)
 
     def do_shutdown():
         time.sleep(0.3)
+        # Termux's toybox pkill cannot see setsid'd processes, so scan /proc
+        # directly for cloudflared by cmdline and kill by PID.
         try:
-            subprocess.run(["pkill", "-9", "-f", "cloudflared"], check=False)
+            for pid in os.listdir("/proc"):
+                if not pid.isdigit():
+                    continue
+                try:
+                    with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                        cmd = fh.read().decode("utf-8", "ignore")
+                except OSError:
+                    continue
+                if "cloudflared tunnel" in cmd and "photo-drop/server.py" not in cmd:
+                    try:
+                        os.kill(int(pid), 9)
+                    except OSError:
+                        pass
         except Exception:
             pass
         try:
@@ -619,13 +1215,14 @@ def drop_page(token: str):
     sid, is_new = require_drop_token()
     free = disk_free()
     if free - RESERVE_BYTES <= 0:
-        return PAGE_FULL, 200, {"Content-Type": "text/html; charset=utf-8"}
+        return html_page(PAGE_FULL)
     resp = make_response(PAGE_UPLOAD.format(
         reserve=human(RESERVE_BYTES),
         max_mb=MAX_FILE_BYTES // (1024 * 1024),
         base=f"/d/{TOKEN}",
     ))
     resp.headers["Content-Type"] = "text/html; charset=utf-8"
+    resp.headers["Cache-Control"] = "no-store"
     if is_new:
         set_session_cookie(resp, sid)
     return resp
@@ -637,13 +1234,21 @@ def drop_status(token: str):
     free = disk_free()
     bid = request.args.get("batch") or ""
     mine = bool(re.fullmatch(r"[a-f0-9]{6,32}", bid or "")) and batch_owned_by(bid, sid)
+    with _ACTIVE_LOCK:
+        active = [t for t in _ACTIVE_TRANSFERS.values() if t["sid"] == sid]
     return jsonify(
         free=free,
         free_human=human(free),
         usable=max(0, free - RESERVE_BYTES),
         uploaded=batch_count(bid) if mine else 0,
+        session_files=session_file_count(sid),
+        receiving=len(active),
+        receiving_files=[t["name"] for t in active],
+        session=sid[:6],
         reserve=RESERVE_BYTES,
         max_concurrent=MAX_CONCURRENT_UPLOADS,
+        max_files=MAX_FILES_PER_SESSION,
+        version=APP_VERSION,
     )
 
 
@@ -689,16 +1294,8 @@ def upload(token: str):
         busy.headers["Retry-After"] = "5"
         return busy, 503
 
-    transfer_id = uuid.uuid4().hex[:8]
-    with _ACTIVE_LOCK:
-        _ACTIVE_TRANSFERS[transfer_id] = {
-            "sid": sid,
-            "bid": bid,
-            "name": original,
-            "size": declared or 0,
-            "written": 0,
-            "started": time.time(),
-        }
+    transfer_id = start_transfer(sid, bid, original, declared or 0)
+    saved = False
 
     try:
         dest_dir = DEST
@@ -708,6 +1305,7 @@ def upload(token: str):
         tmp = dest_dir / f".{name}.part"
 
         written = 0
+        last_home_check = 0
         try:
             with open(tmp, "wb") as out:
                 while True:
@@ -717,9 +1315,12 @@ def upload(token: str):
                     written += len(chunk)
                     if written > MAX_FILE_BYTES or not enough_space(written):
                         raise OSError("phone storage filled up mid-upload")
-                    if written % (8 * 1024 * 1024) == 0 and disk_free_home() < RESERVE_BYTES // 4:
-                        raise OSError("phone storage filled up mid-upload")
+                    if written - last_home_check >= 8 * 1024 * 1024:
+                        last_home_check = written
+                        if disk_free_home() < RESERVE_BYTES // 4:
+                            raise OSError("phone storage filled up mid-upload")
                     out.write(chunk)
+                    update_transfer(transfer_id, written)
             os.replace(tmp, target)
         except (OSError, ClientDisconnected) as exc:
             tmp.unlink(missing_ok=True)
@@ -728,19 +1329,11 @@ def upload(token: str):
 
         # Hand the file to MediaProvider so Google Photos sees it.
         scanned = scan_media([str(target)])
-        entry = record_upload(bid, name, original, written, scanned)
+        record_upload(bid, name, original, written, scanned)
+        saved = True
         log(f"saved {original} -> {name} ({written}B, scan={scanned})")
     finally:
-        with _ACTIVE_LOCK:
-            _ACTIVE_TRANSFERS.pop(transfer_id, None)
-            if "written" in locals() and written > 0 and "target" in locals() and target.exists():
-                _RECENT_UPLOADS.append({
-                    "sid": sid,
-                    "bid": bid,
-                    "name": original,
-                    "size": written,
-                    "finished": time.time(),
-                })
+        finish_transfer(transfer_id, saved)
         # Released even when the write fails, so one bad upload cannot wedge
         # the server for the rest of the session.
         _UPLOAD_SLOTS.release()
@@ -797,6 +1390,7 @@ def done(token: str, batch: str):
         token=TOKEN,
     ))
     resp.headers["Content-Type"] = "text/html; charset=utf-8"
+    resp.headers["Cache-Control"] = "no-store"
     if is_new:
         set_session_cookie(resp, sid)
     return resp
@@ -815,62 +1409,132 @@ def serve_file(token: str, name: str):
     return resp
 
 
+def _owner_token_from_request(token: str = "") -> str:
+    supplied = token or request.args.get("k", "") or request.headers.get("X-PD-Owner", "")
+    if not OWNER_OK or not check_token(supplied, OWNER_TOKEN):
+        abort(404)
+    return supplied
+
+
+def _owner_urls(token: str, supplied: str) -> tuple[str, str, str]:
+    """Return API, clear-cache and diagnostics URLs for the current auth form.
+
+    The path form is preferred because query strings leak through logs and
+    Referer headers. The query form stays for already-bookmarked links.
+    """
+    if token:
+        base = f"/owner/{quote(token, safe='')}"
+        return f"{base}/api/state", f"{base}/api/clear-parts", f"{base}/api/diagnostics"
+    key = quote(supplied, safe="")
+    return (
+        f"/owner/api/state?k={key}",
+        f"/owner/api/clear-parts?k={key}",
+        f"/owner/api/diagnostics?k={key}",
+    )
+
+
 @app.get("/owner")
 @app.get("/owner/<token>")
 def owner_dashboard(token: str = ""):
-    """Owner dashboard.
+    """Owner console, live.
 
-    Prefers the path form /owner/<token>. A query string (?k=...) ends up in
-    access logs and Referer headers, so start.sh prints the path form and this
-    keeps working as a fallback for a bookmarked URL.
+    Two hard requirements shaped this page:
+
+    * It must work from inside the Android app over loopback, without the
+      public tunnel. The app opens /owner/<token> directly.
+    * It must show real sessions and real byte progress, not just a list of
+      anonymous batch directories.
+
+    The page is self-contained: no CDNs, no external fonts, no build step. A
+    phone tunnel can be slow or offline; the dashboard still renders.
     """
-    supplied = token or request.args.get("k", "")
-    if not OWNER_OK or not check_token(supplied, OWNER_TOKEN):
-        abort(404)
+    supplied = _owner_token_from_request(token)
+    api_url, clear_url, diag_url = _owner_urls(token, supplied)
+    drop_url = share_url()
+    state = build_owner_state()
+    initial_json = json.dumps(state).replace("</", "<\\/")
 
-    free = disk_free()
-    recent = []
-    if BATCHES.exists():
-        for d in sorted(BATCHES.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
-            if time.time() - d.stat().st_mtime > SESSION_TTL:
+    body = PAGE_OWNER.substitute(
+        version=escape(APP_VERSION),
+        dest=escape(str(DEST)),
+        reserve=escape(human(RESERVE_BYTES)),
+        max_mb=MAX_FILE_BYTES // (1024 * 1024),
+        max_files=MAX_FILES_PER_SESSION,
+        max_concurrent=MAX_CONCURRENT_UPLOADS,
+        selftest=escape(media_scan_selftest()),
+        api_url_js=json.dumps(api_url),
+        clear_url_js=json.dumps(clear_url),
+        diag_url_js=json.dumps(diag_url),
+        drop_url_js=json.dumps(drop_url),
+        drop_url_html=escape(drop_url),
+        initial_state_json=initial_json,
+    )
+    return html_page(body)
+
+
+@app.get("/owner/api/state")
+@app.get("/owner/<token>/api/state")
+def owner_state(token: str = ""):
+    _owner_token_from_request(token)
+    resp = jsonify(build_owner_state())
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.post("/owner/api/clear-parts")
+@app.post("/owner/<token>/api/clear-parts")
+def owner_clear_parts(token: str = ""):
+    """Delete orphaned .part files, but never an upload that is still writing.
+
+    Only files older than five minutes are eligible. A live transfer keeps
+    touching its .part file, so this cannot race a guest who is mid-upload.
+    """
+    _owner_token_from_request(token)
+    now = time.time()
+    removed = 0
+    freed = 0
+    skipped = 0
+    if DEST.exists():
+        for path in DEST.glob(".*.part"):
+            try:
+                if not path.is_file():
+                    continue
+                age = now - path.stat().st_mtime
+                if age < 300:
+                    skipped += 1
+                    continue
+                size = path.stat().st_size
+                path.unlink()
+                removed += 1
+                freed += size
+            except OSError:
                 continue
-            files = batch_files(d.name)
-            recent.append(
-                f"<tr><td>{d.name}</td><td>{len(files)}</td>"
-                f"<td>{human(batch_total(d.name))}</td>"
-                f"<td>{datetime.fromtimestamp(d.stat().st_mtime).strftime('%H:%M:%S')}</td></tr>"
-            )
+    log(f"owner cleared {removed} stale partial(s), {freed}B")
+    return jsonify(ok=True, removed=removed, bytes=freed, bytes_human=human(freed), skipped=skipped)
 
-    selftest = subprocess.run(
-        ["bash", MEDIA_SCAN, "--selftest"], capture_output=True, text=True
-    ).stdout.strip()
 
-    return f"""<!doctype html><meta charset=utf-8>
-<meta name=viewport content="width=device-width,initial-scale=1">
-<title>Photo Drop — owner</title>
-<style>
- body{{background:#0b0b0d;color:#e8e8ea;font:15px/1.5 -apple-system,system-ui,sans-serif;padding:20px;max-width:720px;margin:auto}}
- h1{{font-size:20px}} code{{background:#1a1a1e;padding:2px 6px;border-radius:4px;font-size:13px}}
- .box{{background:#151519;border:1px solid #26262c;border-radius:12px;padding:16px;margin:14px 0}}
- a{{color:#7cc4ff}} table{{width:100%;border-collapse:collapse;font-size:14px}}
- td{{padding:6px 8px;border-bottom:1px solid #26262c;text-align:left}}
- .bar{{height:8px;background:#26262c;border-radius:99px;overflow:hidden;margin-top:8px}}
- .fill{{background:{'#4ade80' if free-RESERVE_BYTES>RESERVE_BYTES else '#f87171'};height:100%}}
-</style>
-<h1>Photo Drop — owner</h1>
-<div class=box>
-  <b>Drop link</b><br><code>{request.host_url.rstrip('/')}/d/{TOKEN}</code><br>
-  <span style="color:#888;font-size:13px">Send this to your friend. It is the credential — anyone with it can upload.</span>
-</div>
-<div class=box>
-  <b>Destination</b> <code>{DEST}</code><br>
-  <b>Free</b> {human(free)} · <b>reserve</b> {human(RESERVE_BYTES)}
-  <div class=bar><div class=fill style="width:{min(100, free/disk_free()*100 if disk_free() else 0):.0f}%"></div></div>
-</div>
-<div class=box><b>Media scan capabilities</b><pre style="font-size:13px;color:#aaa">{selftest}</pre></div>
-<div class=box><b>Recent uploads</b>
-<table><tr><td>batch</td><td>files</td><td>size</td><td>at</td></tr>{''.join(recent) or '<tr><td colspan=4>none yet</td></tr>'}</table>
-</div>"""
+@app.get("/owner/api/diagnostics")
+@app.get("/owner/<token>/api/diagnostics")
+def owner_diagnostics(token: str = ""):
+    _owner_token_from_request(token)
+    tail = []
+    log_path = LOGS / "photo-drop.log"
+    try:
+        if log_path.exists():
+            with open(log_path, "r", encoding="utf-8", errors="ignore") as fh:
+                tail = fh.readlines()[-100:]
+    except OSError:
+        pass
+    payload = {
+        "state": build_owner_state(),
+        "media_scan_selftest": media_scan_selftest(),
+        "log_tail": [line.rstrip("\n") for line in tail],
+    }
+    resp = make_response(json.dumps(payload, indent=2))
+    resp.headers["Content-Type"] = "application/json; charset=utf-8"
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["Content-Disposition"] = 'attachment; filename="photo-drop-diagnostics.json"'
+    return resp
 
 
 def human(n: int) -> str:
@@ -884,6 +1548,534 @@ def human(n: int) -> str:
 # --------------------------------------------------------------------------
 # pages
 # --------------------------------------------------------------------------
+
+# The owner console is a Template rather than an f-string because it contains
+# a lot of CSS and JavaScript braces. Dollar placeholders keep the markup
+# readable and make accidental interpolation obvious.
+PAGE_OWNER = Template("""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#f9f9ff">
+<title>Photo Drop — Live</title>
+<style>
+  :root {
+    --bg: #f9f9ff;
+    --surface: #ffffff;
+    --surface-low: #f1f3ff;
+    --surface-mid: #e9edff;
+    --surface-high: #e1e8fd;
+    --ink: #141b2b;
+    --muted: #3e4943;
+    --faint: #6e7a73;
+    --line: #dce2f7;
+    --line-soft: #edf0fa;
+    --primary: #005d42;
+    --primary-soft: #e6f4ea;
+    --primary-tint: #97f5cc;
+    --accent: #904d00;
+    --accent-soft: #ffdcc3;
+    --danger: #ba1a1a;
+    --danger-soft: #ffdad6;
+    --shadow: 0 1px 2px rgba(20, 27, 43, .05), 0 8px 24px rgba(20, 27, 43, .05);
+    --radius: 18px;
+    --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; background: var(--bg); }
+  body {
+    color: var(--ink);
+    font-family: var(--font);
+    font-size: 15px;
+    line-height: 1.45;
+    min-height: 100vh;
+    padding: calc(env(safe-area-inset-top, 0px) + 18px) 16px calc(env(safe-area-inset-bottom, 0px) + 28px);
+  }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  .top { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+  .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .logo {
+    width: 42px; height: 42px; border-radius: 13px; flex: 0 0 auto;
+    background: linear-gradient(145deg, #047857 0%, #005d42 100%);
+    color: #fff; display: grid; place-items: center;
+    box-shadow: 0 6px 16px rgba(0, 93, 66, .22);
+  }
+  .brand h1 { font-size: 17px; line-height: 1.15; margin: 0; letter-spacing: -.02em; }
+  .brand p { margin: 2px 0 0; color: var(--faint); font-size: 11.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
+  .live { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; padding: 5px 10px; border-radius: 99px; background: var(--surface-mid); color: var(--primary); font-size: 11.5px; font-weight: 700; }
+  .live.offline { background: var(--danger-soft); color: var(--danger); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--primary); box-shadow: 0 0 0 4px rgba(0, 93, 66, .1); animation: pulse 1.8s ease-in-out infinite; }
+  .live.offline .dot { background: var(--danger); box-shadow: none; animation: none; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+
+  .hero { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; box-shadow: var(--shadow); margin-bottom: 20px; }
+  .hero-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+  .eyebrow { margin: 0 0 5px; color: var(--faint); font-size: 10.5px; font-weight: 800; letter-spacing: .12em; }
+  .hero h2 { margin: 0; font-size: 23px; line-height: 1.15; letter-spacing: -.03em; }
+  .hero-sub { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+  .hero-badge { flex: 0 0 auto; border-radius: 99px; padding: 5px 10px; background: var(--primary-soft); color: var(--primary); font-size: 11px; font-weight: 800; letter-spacing: .04em; }
+  .hero-badge.warn { background: var(--danger-soft); color: var(--danger); }
+  .storage { margin-top: 16px; }
+  .storage-row { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; color: var(--muted); font-size: 12px; margin-bottom: 7px; }
+  .storage-row b { color: var(--ink); font-size: 13px; }
+  .bar { position: relative; height: 9px; border-radius: 99px; background: var(--surface-high); overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 99px; background: linear-gradient(90deg, #047857, #10a06d); transition: width .35s ease; }
+  .bar-reserve { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--accent); opacity: .7; transition: left .35s ease; }
+  .storage-hint { display: flex; justify-content: space-between; gap: 10px; margin-top: 6px; color: var(--faint); font-size: 11px; }
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 14px; }
+  .stat { background: var(--surface-low); border-radius: 12px; padding: 10px; min-width: 0; }
+  .stat-label { display: block; color: var(--faint); font-size: 10.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+  .stat-value { display: block; margin-top: 2px; font-size: 19px; font-weight: 800; line-height: 1.1; font-variant-numeric: tabular-nums; }
+  .stat-sub { display: block; color: var(--faint); font-size: 11px; margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  .section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin: 20px 2px 9px; }
+  .section-head h2 { margin: 0; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  .section-head span { color: var(--faint); font-size: 11.5px; font-weight: 600; }
+  .sessions { display: flex; flex-direction: column; gap: 10px; }
+  .session { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 14px; box-shadow: var(--shadow); }
+  .session.state-uploading { border-color: #b7dfc4; box-shadow: 0 0 0 2px rgba(4, 120, 87, .07), var(--shadow); }
+  .s-top { display: flex; align-items: center; gap: 10px; }
+  .avatar { width: 38px; height: 38px; border-radius: 12px; flex: 0 0 auto; display: grid; place-items: center; background: var(--surface-mid); color: var(--primary); font-weight: 800; font-size: 15px; }
+  .s-id { min-width: 0; flex: 1; }
+  .s-name { font-size: 14.5px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .s-meta { color: var(--faint); font-size: 11.5px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pill { flex: 0 0 auto; border-radius: 99px; padding: 4px 8px; font-size: 10.5px; font-weight: 800; letter-spacing: .02em; }
+  .pill.uploading { background: var(--primary-soft); color: var(--primary); }
+  .pill.recent { background: #e7f7ee; color: #0b6b42; }
+  .pill.connected { background: var(--surface-mid); color: var(--primary); }
+  .pill.idle { background: var(--surface-low); color: var(--faint); }
+  .s-stats { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 10px; color: var(--faint); font-size: 11.5px; }
+  .s-stats b { color: var(--ink); font-size: 12.5px; }
+  .active-list { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .active-file { background: var(--surface-low); border-radius: 11px; padding: 9px 10px; }
+  .active-top { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; }
+  .fname { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+  .fsize { flex: 0 0 auto; color: var(--primary); font-weight: 700; font-variant-numeric: tabular-nums; }
+  .mini-bar { height: 5px; border-radius: 99px; background: var(--surface-high); overflow: hidden; margin-top: 6px; }
+  .mini-fill { height: 100%; border-radius: 99px; background: linear-gradient(90deg, #047857, #10a06d); transition: width .25s linear; }
+  .active-sub { color: var(--faint); font-size: 10.5px; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
+  .chip { max-width: 100%; border-radius: 99px; background: var(--surface-low); color: var(--muted); padding: 4px 8px; font-size: 10.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .empty { display: none; text-align: center; padding: 24px 14px; border: 1px dashed var(--line); border-radius: 16px; color: var(--faint); font-size: 13px; background: rgba(255,255,255,.55); }
+
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 14px; box-shadow: var(--shadow); }
+  .muted { color: var(--faint); font-size: 12.5px; margin: 0; }
+  .list { display: flex; flex-direction: column; gap: 0; padding: 4px 14px; }
+  .activity { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--line-soft); min-width: 0; }
+  .activity:last-child { border-bottom: none; }
+  .activity-icon { width: 32px; height: 32px; flex: 0 0 auto; border-radius: 10px; background: var(--primary-soft); color: var(--primary); display: grid; place-items: center; }
+  .activity-body { min-width: 0; flex: 1; }
+  .activity-name { font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .activity-meta { color: var(--faint); font-size: 10.5px; margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .activity-size { flex: 0 0 auto; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .activity-empty { padding: 16px 0; color: var(--faint); font-size: 12.5px; text-align: center; }
+
+  .link-row { display: flex; align-items: stretch; gap: 8px; margin-top: 10px; }
+  .link-row code { flex: 1; min-width: 0; background: var(--surface-low); border-radius: 10px; padding: 9px 10px; font-family: var(--mono); font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .btn { appearance: none; border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: 10px; padding: 8px 12px; font: inherit; font-size: 12px; font-weight: 700; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; gap: 6px; cursor: pointer; }
+  .btn:active { transform: translateY(1px); }
+  .btn.small { flex: 0 0 auto; background: var(--primary); border-color: var(--primary); color: #fff; }
+  .btn.ghost { background: var(--surface-low); color: var(--muted); }
+  .btn.danger { background: var(--danger-soft); border-color: #f2c0bc; color: var(--danger); }
+  .btn:disabled { opacity: .5; }
+  .sys { display: flex; flex-direction: column; gap: 9px; }
+  .kv { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; font-size: 12.5px; color: var(--faint); }
+  .kv b, .kv code { color: var(--ink); text-align: right; font-weight: 600; overflow-wrap: anywhere; }
+  .kv code { font-family: var(--mono); font-size: 11px; }
+  details { margin-top: 2px; }
+  summary { cursor: pointer; color: var(--primary); font-size: 12px; font-weight: 700; }
+  pre { margin: 8px 0 0; padding: 10px; background: var(--surface-low); border-radius: 10px; color: var(--muted); font-family: var(--mono); font-size: 10.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .danger-zone { margin-top: 20px; }
+  .danger-zone b { font-size: 13px; }
+  .danger-zone .row { margin-top: 8px; }
+  footer { margin-top: 22px; text-align: center; color: var(--faint); font-size: 10.5px; line-height: 1.6; }
+  @media (min-width: 640px) {
+    .stats { grid-template-columns: repeat(3, 1fr); }
+    .hero h2 { font-size: 26px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .dot { animation: none; }
+    .bar-fill, .bar-reserve, .mini-fill { transition: none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <div class="logo" aria-hidden="true">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 16V4m0 0L8 8m4-4 4 4"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>
+        </svg>
+      </div>
+      <div>
+        <h1>Photo Drop</h1>
+        <p>Owner console</p>
+      </div>
+    </div>
+    <div class="live" id="livePill"><span class="dot"></span><span id="liveText">Live</span></div>
+  </header>
+
+  <section class="hero">
+    <div class="hero-top">
+      <div>
+        <p class="eyebrow">PHONE STATUS</p>
+        <h2 id="heroTitle">Connecting…</h2>
+        <p class="hero-sub" id="heroSub">Reading live state from the server.</p>
+      </div>
+      <div class="hero-badge" id="heroBadge">…</div>
+    </div>
+    <div class="storage">
+      <div class="storage-row"><span><b id="freeText">--</b> free</span><span id="usedText">--</span></div>
+      <div class="bar"><div class="bar-fill" id="freeBar" style="width:0%"></div><div class="bar-reserve" id="reserveBar" style="left:90%"></div></div>
+      <div class="storage-hint"><span>Safety reserve $reserve</span><span id="pctText">--</span></div>
+    </div>
+    <div class="stats">
+      <div class="stat"><span class="stat-label">Sessions</span><span class="stat-value" id="statSessions">0</span><span class="stat-sub" id="statConnected">0 connected</span></div>
+      <div class="stat"><span class="stat-label">Receiving</span><span class="stat-value" id="statInflight">0</span><span class="stat-sub" id="statUploading">idle</span></div>
+      <div class="stat"><span class="stat-label">Uploaded</span><span class="stat-value" id="statFiles">0</span><span class="stat-sub" id="statBytes">0 B</span></div>
+    </div>
+  </section>
+
+  <div class="section-head"><h2>Live sessions</h2><span id="sessionCount">0</span></div>
+  <div class="sessions" id="sessions"></div>
+  <div class="empty" id="sessionsEmpty">
+    <b>No one is connected yet.</b><br>
+    Send the drop link below. Sessions and file progress appear here the moment a guest opens it.
+  </div>
+
+  <div class="section-head"><h2>Recent uploads</h2><span id="recentCount"></span></div>
+  <div class="card list" id="recent"></div>
+
+  <div class="section-head"><h2>Share</h2></div>
+  <div class="card">
+    <p class="muted">This link is the credential. Anyone who has it can upload while the server is running.</p>
+    <div class="link-row">
+      <code id="dropUrl">$drop_url_html</code>
+      <button class="btn small" id="copyBtn" type="button">Copy</button>
+    </div>
+    <div class="row">
+      <a class="btn ghost" href="$drop_url_html" target="_blank" rel="noopener">Open guest page</a>
+      <span class="muted" id="copyState"></span>
+    </div>
+  </div>
+
+  <div class="section-head"><h2>System</h2><span id="lastUpdated">just now</span></div>
+  <div class="card sys">
+    <div class="kv"><span>Destination</span><code>$dest</code></div>
+    <div class="kv"><span>Storage</span><b id="sysStorage">--</b></div>
+    <div class="kv"><span>Uptime</span><b id="sysUptime">--</b></div>
+    <div class="kv"><span>Version</span><b>$version</b></div>
+    <div class="kv"><span>Limits</span><span id="sysLimits">$max_mb MB per file · $max_files per session · $max_concurrent at once</span></div>
+    <div class="kv"><span>Public URL</span><code id="sysPublic">--</code></div>
+    <details>
+      <summary>Media scan capabilities</summary>
+      <pre>$selftest</pre>
+    </details>
+  </div>
+
+  <div class="card danger-zone">
+    <b>Housekeeping</b>
+    <p class="muted" style="margin-top:4px">Remove stalled .part files older than 5 minutes. Active uploads are never touched.</p>
+    <div class="row">
+      <button class="btn ghost" id="clearBtn" type="button">Clear temp cache</button>
+      <button class="btn ghost" id="diagBtn" type="button">Download diagnostics</button>
+    </div>
+    <p class="muted" id="houseState" style="margin-top:8px"></p>
+  </div>
+
+  <footer>
+    Live over loopback in the app, or through the tunnel in a browser.<br>
+    Owner token stays in this URL — treat it like the drop link.
+  </footer>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var state = $initial_state_json;
+  var API = $api_url_js;
+  var CLEAR = $clear_url_js;
+  var DIAG = $diag_url_js;
+  var DROP = $drop_url_js;
+  var lastUpdate = Date.now();
+  var online = true;
+
+  function esc(value) {
+    return String(value === null || value === undefined ? "" : value).replace(/[&<>"']/g, function (c) {
+      return {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c];
+    });
+  }
+
+  function ageText(seconds) {
+    if (seconds === null || seconds === undefined) return "just now";
+    var s = Math.max(0, Math.floor(seconds));
+    if (s < 5) return "just now";
+    if (s < 60) return s + "s ago";
+    var m = Math.floor(s / 60);
+    if (m < 60) return m + "m ago";
+    var h = Math.floor(m / 60);
+    if (h < 24) return h + "h ago";
+    return Math.floor(h / 24) + "d ago";
+  }
+
+  function stateLabel(stateName) {
+    if (stateName === "uploading") return "Uploading";
+    if (stateName === "recent") return "Just received";
+    if (stateName === "connected") return "Connected";
+    return "Idle";
+  }
+
+  function activityHtml(item) {
+    return '<div class="activity">'
+      + '<div class="activity-icon" aria-hidden="true">' + iconFile() + '</div>'
+      + '<div class="activity-body">'
+      + '<div class="activity-name">' + esc(item.name) + '</div>'
+      + '<div class="activity-meta">' + esc(item.label || "Guest") + ' · ' + esc(item.session || "") + ' · ' + esc(ageText(item.age)) + '</div>'
+      + '</div>'
+      + '<div class="activity-size">' + esc(item.size_human) + '</div>'
+      + '</div>';
+  }
+
+  function iconFile() {
+    return '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>';
+  }
+
+  function sessionHtml(s) {
+    var active = "";
+    if (s.active && s.active.length) {
+      active = '<div class="active-list">' + s.active.map(function (f) {
+        var pct = Math.max(0, Math.min(100, Number(f.pct) || 0));
+        return '<div class="active-file">'
+          + '<div class="active-top"><span class="fname">' + esc(f.name) + '</span><span class="fsize">' + pct + '%</span></div>'
+          + '<div class="mini-bar"><div class="mini-fill" style="width:' + pct + '%"></div></div>'
+          + '<div class="active-sub">' + esc(f.written_human) + ' of ' + esc(f.size_human)
+          + (f.bps_human ? ' · ' + esc(f.bps_human) : '') + '</div>'
+          + '</div>';
+      }).join('') + '</div>';
+    }
+    var recent = "";
+    if (s.recent && s.recent.length) {
+      recent = '<div class="chips">' + s.recent.map(function (f) {
+        return '<span class="chip">' + esc(f.name) + ' · ' + esc(f.size_human) + '</span>';
+      }).join('') + '</div>';
+    }
+    var initial = (s.label || "G").trim().charAt(0).toUpperCase() || "G";
+    return '<article class="session state-' + esc(s.state) + '">'
+      + '<div class="s-top">'
+      + '<div class="avatar" aria-hidden="true">' + esc(initial) + '</div>'
+      + '<div class="s-id"><div class="s-name">' + esc(s.label || "Browser") + '</div>'
+      + '<div class="s-meta">Guest ' + esc(s.id) + ' · ' + esc(s.ip || "unknown IP") + '</div></div>'
+      + '<span class="pill ' + esc(s.state) + '">' + esc(stateLabel(s.state)) + '</span>'
+      + '</div>'
+      + '<div class="s-stats"><span><b>' + esc(s.files) + '</b> file' + (s.files === 1 ? '' : 's') + '</span>'
+      + '<span><b>' + esc(s.bytes_human) + '</b> received</span>'
+      + '<span>seen ' + esc(ageText(s.last_seen_age)) + '</span></div>'
+      + active + recent
+      + '</article>';
+  }
+
+  function render(s) {
+    var totals = s.totals || {};
+    var storage = s.storage || {};
+    var sessions = s.sessions || [];
+    var inFlight = Number(totals.in_flight) || 0;
+    var uploading = Number(totals.uploading_sessions) || 0;
+
+    var title = inFlight > 0
+      ? "Receiving " + inFlight + (inFlight === 1 ? " file" : " files")
+      : (Number(totals.connected_sessions) > 0 ? "Phone is online" : "Ready for a drop");
+    document.getElementById("heroTitle").textContent = title;
+
+    var sub = Number(totals.sessions) > 0
+      ? totals.sessions + (totals.sessions === 1 ? " session" : " sessions") + " · "
+        + (totals.files || 0) + " files · " + (totals.bytes_human || "0 B") + " received"
+      : "No sessions yet. Share the link below when you are ready.";
+    document.getElementById("heroSub").textContent = sub;
+
+    var badge = document.getElementById("heroBadge");
+    if (storage.low) {
+      badge.textContent = "LOW STORAGE";
+      badge.className = "hero-badge warn";
+    } else if (inFlight > 0) {
+      badge.textContent = "LIVE";
+      badge.className = "hero-badge";
+    } else {
+      badge.textContent = "ONLINE";
+      badge.className = "hero-badge";
+    }
+
+    document.getElementById("freeText").textContent = storage.free_human || "--";
+    document.getElementById("usedText").textContent = storage.total
+      ? (storage.used_human || "0 B") + " of " + storage.total_human
+      : "storage unknown";
+    var freePct = Math.max(0, Math.min(100, Number(storage.free_pct) || 0));
+    document.getElementById("freeBar").style.width = freePct + "%";
+    var reservePct = storage.total ? Math.min(100, 100 * (Number(storage.reserve) || 0) / Number(storage.total)) : 0;
+    document.getElementById("reserveBar").style.left = Math.max(0, 100 - reservePct) + "%";
+    document.getElementById("pctText").textContent = freePct + "% free";
+
+    document.getElementById("statSessions").textContent = totals.sessions || 0;
+    document.getElementById("statConnected").textContent = (totals.connected_sessions || 0) + " connected";
+    document.getElementById("statInflight").textContent = inFlight;
+    document.getElementById("statUploading").textContent = uploading > 0
+      ? uploading + (uploading === 1 ? " session" : " sessions")
+      : "idle";
+    document.getElementById("statFiles").textContent = totals.files || 0;
+    document.getElementById("statBytes").textContent = totals.bytes_human || "0 B";
+
+    var shownSessions = sessions.length;
+    var totalSessions = Number(totals.sessions) || shownSessions;
+    document.getElementById("sessionCount").textContent = shownSessions
+      ? (shownSessions < totalSessions
+          ? "showing " + shownSessions + " of " + totalSessions
+          : shownSessions + (shownSessions === 1 ? " guest" : " guests"))
+      : "none";
+    document.getElementById("sessions").innerHTML = sessions.map(sessionHtml).join("");
+    document.getElementById("sessionsEmpty").style.display = sessions.length ? "none" : "block";
+
+    var recent = s.recent || [];
+    document.getElementById("recentCount").textContent = recent.length ? "last " + recent.length : "";
+    document.getElementById("recent").innerHTML = recent.length
+      ? recent.map(activityHtml).join("")
+      : '<div class="activity-empty">Nothing received yet.</div>';
+
+    document.getElementById("sysStorage").textContent = (storage.free_human || "--") + " free of " + (storage.total_human || "--");
+    document.getElementById("sysUptime").textContent = s.uptime_human || "--";
+    var limits = s.limits || {};
+    document.getElementById("sysLimits").textContent = (limits.max_file_human || "--") + " per file · "
+      + (limits.max_files || "--") + " per session · " + (limits.max_concurrent || "--") + " at once";
+    document.getElementById("sysPublic").textContent = (s.network && s.network.public_url) || "LAN only";
+    lastUpdate = Date.now();
+    renderFreshness();
+  }
+
+  function renderFreshness() {
+    var seconds = Math.floor((Date.now() - lastUpdate) / 1000);
+    document.getElementById("lastUpdated").textContent = online
+      ? (seconds < 3 ? "live now" : "updated " + ageText(seconds))
+      : "reconnecting…";
+  }
+
+  function renderPill() {
+    var pill = document.getElementById("livePill");
+    var text = document.getElementById("liveText");
+    if (online) {
+      pill.className = "live";
+      text.textContent = "Live";
+    } else {
+      pill.className = "live offline";
+      text.textContent = "Reconnecting";
+    }
+  }
+
+  function refresh(force) {
+    if (!force && document.hidden) return;
+    fetch(API, {cache: "no-store", headers: {"Accept": "application/json"}})
+      .then(function (response) {
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        return response.json();
+      })
+      .then(function (next) {
+        online = true;
+        renderPill();
+        render(next);
+      })
+      .catch(function () {
+        online = false;
+        renderPill();
+        renderFreshness();
+      });
+  }
+
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text);
+    }
+    return new Promise(function (resolve, reject) {
+      try {
+        var area = document.createElement("textarea");
+        area.value = text;
+        area.setAttribute("readonly", "");
+        area.style.position = "fixed";
+        area.style.opacity = "0";
+        document.body.appendChild(area);
+        area.select();
+        var ok = document.execCommand("copy");
+        document.body.removeChild(area);
+        ok ? resolve() : reject(new Error("copy failed"));
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+
+  var copyBtn = document.getElementById("copyBtn");
+  copyBtn.addEventListener("click", function () {
+    copyText(DROP).then(function () {
+      document.getElementById("copyState").textContent = "Copied to clipboard";
+      copyBtn.textContent = "Copied";
+      setTimeout(function () { copyBtn.textContent = "Copy"; }, 1800);
+    }).catch(function () {
+      document.getElementById("copyState").textContent = "Select the link above to copy manually.";
+    });
+  });
+
+  var clearBtn = document.getElementById("clearBtn");
+  var clearing = false;
+  clearBtn.addEventListener("click", function () {
+    if (clearing) return;
+    if (clearBtn.getAttribute("data-confirm") !== "1") {
+      clearBtn.setAttribute("data-confirm", "1");
+      clearBtn.textContent = "Tap again to confirm";
+      setTimeout(function () {
+        if (clearBtn.getAttribute("data-confirm") !== "1") return;
+        clearBtn.setAttribute("data-confirm", "0");
+        clearBtn.textContent = "Clear temp cache";
+      }, 3200);
+      return;
+    }
+    clearBtn.setAttribute("data-confirm", "0");
+    clearBtn.disabled = true;
+    clearBtn.textContent = "Clearing…";
+    clearing = true;
+    fetch(CLEAR, {method: "POST"})
+      .then(function (response) { return response.json(); })
+      .then(function (result) {
+        document.getElementById("houseState").textContent = result.removed
+          ? "Removed " + result.removed + " stale file(s), freed " + result.bytes_human + "."
+          : "No stale temp files found." + (result.skipped ? " " + result.skipped + " active file(s) left alone." : "");
+        refresh(true);
+      })
+      .catch(function () {
+        document.getElementById("houseState").textContent = "Could not clear temp files. Try again.";
+      })
+      .then(function () {
+        clearing = false;
+        clearBtn.disabled = false;
+        clearBtn.textContent = "Clear temp cache";
+      });
+  });
+
+  document.getElementById("diagBtn").addEventListener("click", function () {
+    window.location.href = DIAG;
+  });
+
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) refresh(true);
+  });
+
+  renderPill();
+  render(state);
+  refresh(true);
+  setInterval(function () { refresh(false); }, 1200);
+  setInterval(renderFreshness, 1000);
+})();
+</script>
+</body></html>""")
 
 PAGE_INDEX = """<!doctype html><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
@@ -1003,6 +2195,33 @@ PAGE_UPLOAD = """<!doctype html><html lang="en"><head><meta charset="utf-8">
     color: var(--fg-subtle);
     margin-top: 6px;
   }}
+  .live-strip {{
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: -8px 2px 18px;
+    color: var(--fg-muted);
+    font-size: 11.5px;
+  }}
+  .live-dot {{
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 0 4px var(--accent-glow);
+    animation: livePulse 2s ease-in-out infinite;
+  }}
+  @keyframes livePulse {{
+    0%, 100% {{ opacity: 1; }}
+    50% {{ opacity: .35; }}
+  }}
+  .live-label b {{
+    color: var(--fg);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-weight: 600;
+  }}
+  .live-sep {{ color: var(--fg-subtle); }}
   .dropzone {{
     border: 2px dashed rgba(255, 255, 255, 0.16);
     background: rgba(255, 255, 255, 0.02);
@@ -1229,6 +2448,13 @@ PAGE_UPLOAD = """<!doctype html><html lang="en"><head><meta charset="utf-8">
     <p class="space-hint">Uploads pause at {reserve} free to protect phone storage. Up to {max_mb} MB per file.</p>
   </div>
 
+  <div class="live-strip">
+    <span class="live-dot"></span>
+    <span class="live-label">Live session <b id="sessionId">—</b></span>
+    <span class="live-sep">·</span>
+    <span id="sessionFiles">0 files received</span>
+  </div>
+
   <div class="dropzone" id="drop">
     <div class="drop-icon">
       <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1291,10 +2517,19 @@ async function poll() {{
     document.getElementById("free").textContent = d.free_human;
     const pct = d.reserve ? (d.usable / (d.usable + d.reserve)) * 100 : 100;
     document.getElementById("spacebar").style.width = Math.max(2, Math.min(100, pct)) + "%";
+    document.getElementById("sessionId").textContent = d.session || "—";
+    document.getElementById("sessionFiles").textContent =
+      (d.session_files || 0) + ((d.session_files || 0) === 1 ? " file received" : " files received");
   }} catch (e) {{}}
 }}
 poll();
-setInterval(poll, 5000);
+setInterval(poll, 3000);
+
+window.addEventListener("beforeunload", e => {{
+  if (!isUploading) return;
+  e.preventDefault();
+  e.returnValue = "";
+}});
 
 const drop = document.getElementById("drop");
 const pick = document.getElementById("pick");

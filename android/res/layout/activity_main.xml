@@ -362,7 +362,7 @@
             android:layout_marginTop="6dp"
             android:background="@drawable/btn_text_only"
             android:gravity="center"
-            android:text="Owner dashboard"
+            android:text="Open live dashboard"
             android:textAllCaps="false"
             android:textColor="@color/text_faint"
             android:textSize="12sp"/>

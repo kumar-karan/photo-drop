@@ -196,14 +196,14 @@ public class MainActivity extends Activity {
         });
 
         btnOwner.setOnClickListener(v -> {
-            String target = (preferTunnel && !publicUrl.isEmpty())
-                    ? publicUrl
-                    : (!lanIp.isEmpty() ? "http://" + lanIp + ":" + PORT : "http://127.0.0.1:" + PORT);
-            String url = target + "/owner?k=" + ownerToken;
+            if (!lastHealth.up) {
+                toast("Start the server first");
+                return;
+            }
             try {
-                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+                startActivity(new Intent(MainActivity.this, OwnerActivity.class));
             } catch (Exception e) {
-                toast("Could not open browser");
+                toast("Could not open the dashboard");
             }
         });
 

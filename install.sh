@@ -96,6 +96,14 @@ echo "  destination ready: /storage/emulated/0/DCIM/PhotoDrop"
 banner "6/6  media scan capability probe"
 bash "$DIR/media_scan.sh" --selftest
 
+# The Android app drives the server through ~/pd-control.sh (Termux cannot
+# read the app's private storage, so this script is the bridge). Older
+# installs copied it by hand and the app silently failed when it was missing.
+chmod +x "$DIR"/*.sh 2>/dev/null || true
+cp "$DIR/pd-control.sh" "$HOME/pd-control.sh"
+chmod +x "$HOME/pd-control.sh"
+echo "  installed $HOME/pd-control.sh for the Android app"
+
 banner "done — start it with"
 echo "  bash $DIR/start.sh --tunnel"
 echo

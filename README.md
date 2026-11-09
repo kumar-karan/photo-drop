@@ -86,6 +86,35 @@ including when you swipe the app away.
 On your own Wi-Fi only (no internet, no tunnel): `bash start.sh` and use the
 local URL it prints.
 
+## Live owner dashboard
+
+There are two ways to watch the drop, and both show the same live state:
+
+- **In the app (recommended).** With the server running, tap **Open live dashboard**
+  on the Photo Drop main screen. It opens the dashboard inside the app over loopback
+  (`127.0.0.1`), independent of the tunnel.
+- **In any browser.** Open `<base-url>/owner/<owner-token>`, for example
+  `http://127.0.0.1:8080/owner/<owner-token>` on the phone itself. The owner
+  token lives in `~/.photo-drop/env` (not the drop link's token).
+
+The dashboard refreshes live and shows:
+- Storage free/used with the 2 GiB reserve indicator;
+- Real guest sessions with device labels (derived from User-Agent), IPs, short IDs, and states;
+- Per-file progress bars, percentage, bytes written, and transfer speed in real time;
+- Files received per session and recent uploads;
+- Share link, uptime, and a one-tap **Clear temp cache** action.
+
+### Live endpoints
+
+| Endpoint | Auth | Purpose |
+| --- | --- | --- |
+| `GET /owner/<owner-token>` | owner token | The dashboard page |
+| `GET /owner/<owner-token>/api/state` | owner token | Full JSON snapshot polled by the dashboard |
+| `GET /owner/<owner-token>/api/diagnostics` | owner token | Storage, process, tunnel and scan information |
+| `POST /owner/<owner-token>/api/clear-parts` | owner token | Delete stale `.part` files |
+| `GET /d/<drop-token>/status?batch=<id>` | drop token | Guest-facing free space, session file count and in-flight files |
+| `GET /healthz` | none / token | Bare `{"ok": true}`; with `X-PD-Token` returns version, uptime, sessions, storage |
+
 ## What the friend sees
 
 1. Opens your link. Nothing to install, no login.
@@ -134,6 +163,7 @@ local URL it prints.
 | Photos don't appear in Google Photos | Enable the `PhotoDrop` backup folder, open Gallery once, reboot. Check owner dashboard scan report. |
 | Upload stalls at 0% | Phone dozed. Plug in, Termux battery Unrestricted, retry. |
 | `cloudflared` missing | `pkg install cloudflared` (must be Termux's build — upstream glibc binary won't run on Termux's bionic). |
+| New server won't come up, or `Stop` doesn't actually stop it | Old builds relied on Termux `pkill`, which silently misses `setsid`'d Python processes (stale server keeps `:8080`). Pull the latest `start.sh`/`stop.sh`/`pd-control.sh`; they scan `/proc` and `TERM`→grace→`SIGKILL` any survivors before starting. |
 
 ## Planned improvements
 
@@ -155,6 +185,8 @@ local URL it prints.
 pip install flask pytest
 python3 -m pytest tests/ -q
 ```
+
+Covers auth, upload, filename sanitisation, space guard, size guard, confirmation page, live session tracking and the owner state API (37 tests).
 
 ## License
 
