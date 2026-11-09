@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.env
+*.part
+android/android-sdk/
+android/out/
+android/photodrop.apk
+android/*.idsig
+android/debug.keystore

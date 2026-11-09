@@ -1,0 +1,371 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/rootLayout"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/page_bg"
+    android:orientation="vertical">
+
+    <!-- ZONE 1: Top Status Band (Pinned) -->
+    <dev.photodrop.app.StatusStripView
+        android:id="@+id/statusStrip"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"/>
+
+    <!-- ZONE 2: Stage (Flex 1) -->
+    <FrameLayout
+        android:id="@+id/stage"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:paddingLeft="20dp"
+        android:paddingRight="20dp">
+
+        <!-- 1. Orb Stage (STOPPED / STARTING) -->
+        <LinearLayout
+            android:id="@+id/orbStage"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:gravity="center"
+            android:orientation="vertical">
+
+            <dev.photodrop.app.OrbView
+                android:id="@+id/orbView"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"/>
+
+            <TextView
+                android:id="@+id/tvOrbCaption"
+                android:layout_width="260dp"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:gravity="center"
+                android:lineSpacingExtra="3dp"
+                android:text="One tap and this becomes a link you can hand to a friend."
+                android:textColor="@color/text_faint"
+                android:textSize="13sp"/>
+        </LinearLayout>
+
+        <!-- 2. Handoff Card (ONLINE) -->
+        <LinearLayout
+            android:id="@+id/handoffCard"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:background="@drawable/card_handoff"
+            android:gravity="center_horizontal"
+            android:orientation="vertical"
+            android:paddingLeft="20dp"
+            android:paddingRight="20dp"
+            android:paddingTop="18dp"
+            android:paddingBottom="18dp"
+            android:visibility="gone">
+
+            <!-- Docked Live Badge -->
+            <TextView
+                android:id="@+id/tvDockedBadge"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:background="@drawable/badge_live"
+                android:paddingLeft="12dp"
+                android:paddingTop="4dp"
+                android:paddingRight="12dp"
+                android:paddingBottom="4dp"
+                android:text="● LIVE"
+                android:textColor="#FFFFFF"
+                android:textSize="10.5sp"
+                android:textStyle="bold"/>
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:letterSpacing="0.08"
+                android:text="HOLD THIS UP TO YOUR FRIEND"
+                android:textColor="@color/text_faint"
+                android:textSize="10sp"
+                android:textStyle="bold"/>
+
+            <!-- Hostname / Domain headline -->
+            <TextView
+                android:id="@+id/tvDropDomain"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:ellipsize="end"
+                android:singleLine="true"
+                android:text="trycloudflare.com"
+                android:textColor="@color/text_main"
+                android:textSize="18sp"
+                android:textStyle="bold"/>
+
+            <!-- Monospace full URL -->
+            <TextView
+                android:id="@+id/tvDropUrl"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:ellipsize="middle"
+                android:fontFamily="monospace"
+                android:singleLine="true"
+                android:text="https://.../d/..."
+                android:textColor="@color/mono_text"
+                android:textSize="11.5sp"/>
+
+            <!-- 184dp ARM'S-LENGTH QR CODE -->
+            <ImageView
+                android:id="@+id/imgQr"
+                android:layout_width="184dp"
+                android:layout_height="184dp"
+                android:layout_marginTop="12dp"
+                android:background="#FFFFFF"
+                android:contentDescription="QR code for photo drop link"
+                android:padding="6dp"
+                android:scaleType="fitCenter"/>
+
+            <TextView
+                android:id="@+id/tvDropHint"
+                android:layout_width="260dp"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:gravity="center"
+                android:lineSpacingExtra="2dp"
+                android:text="They scan, pick photos, watch them upload. Nothing is installed on their phone."
+                android:textColor="@color/text_faint"
+                android:textSize="12sp"/>
+        </LinearLayout>
+
+        <!-- 3. Storage Alert Card (STORAGE_LOW) -->
+        <LinearLayout
+            android:id="@+id/alertCard"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:background="@drawable/card_alert"
+            android:orientation="vertical"
+            android:padding="20dp"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Free some space first"
+                android:textColor="#8C1D18"
+                android:textSize="17sp"
+                android:textStyle="bold"/>
+
+            <TextView
+                android:id="@+id/tvAlertDesc"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:lineSpacingExtra="2dp"
+                android:text="Uploads are paused at 2.0 GB free to keep your phone healthy. Free some storage to resume."
+                android:textColor="#8C1D18"
+                android:textSize="13sp"/>
+        </LinearLayout>
+
+        <!-- 4. Termux Error Card (TERMUX_ERROR) -->
+        <LinearLayout
+            android:id="@+id/permCard"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:background="@drawable/card_dark"
+            android:orientation="vertical"
+            android:padding="20dp"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Can't reach Termux"
+                android:textColor="#FFFFFF"
+                android:textSize="17sp"
+                android:textStyle="bold"/>
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:lineSpacingExtra="2dp"
+                android:text="Grant permission to run commands in Termux, or ensure Termux is installed and running."
+                android:textColor="#C7CCD1"
+                android:textSize="13sp"/>
+
+            <Button
+                android:id="@+id/btnFixPerm"
+                android:layout_width="match_parent"
+                android:layout_height="44dp"
+                android:layout_marginTop="14dp"
+                android:background="@drawable/btn_primary"
+                android:text="Grant Permission"
+                android:textAllCaps="false"
+                android:textColor="#FFFFFF"
+                android:textSize="14sp"
+                android:textStyle="bold"/>
+        </LinearLayout>
+
+    </FrameLayout>
+
+    <!-- ZONE 3: Pinned Bottom Sheet -->
+    <LinearLayout
+        android:id="@+id/sheet"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@drawable/sheet_bg"
+        android:elevation="8dp"
+        android:orientation="vertical"
+        android:paddingLeft="20dp"
+        android:paddingRight="20dp"
+        android:paddingTop="10dp"
+        android:paddingBottom="14dp">
+
+        <!-- Grab Handle -->
+        <View
+            android:layout_width="36dp"
+            android:layout_height="4dp"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginBottom="12dp"
+            android:background="@drawable/grab_handle"/>
+
+        <!-- Live Controls (URL + Copy Link) -->
+        <LinearLayout
+            android:id="@+id/liveControls"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <!-- URL snippet row with flip host button -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/tvSheetUrl"
+                    android:layout_width="0dp"
+                    android:layout_height="38dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/card_low"
+                    android:ellipsize="middle"
+                    android:fontFamily="monospace"
+                    android:gravity="center_vertical"
+                    android:paddingLeft="12dp"
+                    android:paddingRight="12dp"
+                    android:singleLine="true"
+                    android:text="https://.../d/..."
+                    android:textColor="@color/mono_text"
+                    android:textSize="12sp"/>
+
+                <Button
+                    android:id="@+id/btnFlipHost"
+                    android:layout_width="38dp"
+                    android:layout_height="38dp"
+                    android:layout_marginLeft="8dp"
+                    android:background="@drawable/btn_tonal"
+                    android:text="⇄"
+                    android:textColor="@color/text_main"
+                    android:textSize="15sp"/>
+            </LinearLayout>
+
+            <!-- Copy Link Button -->
+            <Button
+                android:id="@+id/btnCopy"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="10dp"
+                android:background="@drawable/btn_primary"
+                android:text="Copy link to send"
+                android:textAllCaps="false"
+                android:textColor="@color/on_primary"
+                android:textSize="15sp"
+                android:textStyle="bold"/>
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:layout_marginTop="12dp"
+                android:layout_marginBottom="10dp"
+                android:background="@color/stroke_soft"/>
+        </LinearLayout>
+
+        <!-- Storage & Session Row (always present in peek & full) -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/tvFree"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="-- free"
+                android:textColor="@color/text_main"
+                android:textSize="13.5sp"
+                android:textStyle="bold"/>
+
+            <dev.photodrop.app.StorageBarView
+                android:id="@+id/storageBar"
+                android:layout_width="0dp"
+                android:layout_height="6dp"
+                android:layout_marginLeft="10dp"
+                android:layout_marginRight="10dp"
+                android:layout_weight="1"/>
+
+            <TextView
+                android:id="@+id/tvSessions"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:background="@drawable/pill_neutral"
+                android:paddingLeft="8dp"
+                android:paddingTop="3dp"
+                android:paddingRight="8dp"
+                android:paddingBottom="3dp"
+                android:text="0 SESSIONS"
+                android:textColor="@color/text_muted"
+                android:textSize="10.5sp"
+                android:textStyle="bold"/>
+        </LinearLayout>
+
+        <!-- Live Stop Button + Guard (Visible when live) -->
+        <LinearLayout
+            android:id="@+id/liveStopSection"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <Button
+                android:id="@+id/btnStop"
+                android:layout_width="match_parent"
+                android:layout_height="44dp"
+                android:background="@drawable/btn_stop"
+                android:text="Stop server"
+                android:textAllCaps="false"
+                android:textColor="#B3261E"
+                android:textSize="14sp"
+                android:textStyle="bold"/>
+
+
+        </LinearLayout>
+
+        <!-- ZONE 4: Nav Row (Owner dashboard link) -->
+        <Button
+            android:id="@+id/btnOwner"
+            android:layout_width="match_parent"
+            android:layout_height="38dp"
+            android:layout_marginTop="6dp"
+            android:background="@drawable/btn_text_only"
+            android:gravity="center"
+            android:text="Owner dashboard"
+            android:textAllCaps="false"
+            android:textColor="@color/text_faint"
+            android:textSize="12sp"/>
+    </LinearLayout>
+
+</LinearLayout>
