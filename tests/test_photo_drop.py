@@ -815,3 +815,114 @@ def test_owner_keeps_device_identity_across_a_restart(client):
     assert session["label"].startswith("Android")
     assert session["ip"] == "198.51.100.9"
     assert session["files"] == 1
+
+
+def test_multi_image_upload_preserves_single_session(client):
+    """Uploading multiple images sequentially or concurrently must not fracture into multiple sessions."""
+    import server
+
+    ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1"
+    # Initial status/page check returns sid
+    status_resp = client.get(
+        f"/d/{server.TOKEN}/status",
+        headers={"User-Agent": ua, "CF-Connecting-IP": "198.51.100.22"},
+    ).get_json()
+    sid = status_resp["sid"]
+    assert sid
+
+    # Upload 3 files with X-PD-Session and sid param
+    for i in range(3):
+        r = client.post(
+            f"/d/{server.TOKEN}/upload?batch=ba0000000001&name=photo_{i}.jpg&sid={sid}",
+            data=f"content-{i}".encode(),
+            content_type="application/octet-stream",
+            headers={"User-Agent": ua, "CF-Connecting-IP": "198.51.100.22", "X-PD-Session": sid},
+        )
+        assert r.status_code == 200
+        assert r.get_json()["sid"] == sid
+
+    state = client.get(f"/owner/{server.OWNER_TOKEN}/api/state").get_json()
+    assert state["totals"]["sessions"] == 1
+    assert state["totals"]["files"] == 3
+    assert len(state["sessions"]) == 1
+    assert state["sessions"][0]["files"] == 3
+
+
+def test_remote_browser_deduplication_by_ip_and_agent(client):
+    """Multiple sessions from the same remote guest IP and device signature are deduplicated."""
+    import server
+
+    ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1"
+    ip = "203.0.113.88"
+
+    # Simulate two separate sessions created by the same guest (e.g. cookie lost across tab reload)
+    r1 = client.post(
+        f"/d/{server.TOKEN}/upload?batch=b11111111111&name=first.jpg",
+        data=b"first-data",
+        content_type="application/octet-stream",
+        headers={"User-Agent": ua, "CF-Connecting-IP": ip},
+    )
+    assert r1.status_code == 200
+
+    # Fresh client simulating dropped cookies
+    client2 = server.app.test_client()
+
+    r2 = client2.post(
+        f"/d/{server.TOKEN}/upload?batch=b22222222222&name=second.jpg",
+        data=b"second-data",
+        content_type="application/octet-stream",
+        headers={"User-Agent": ua, "CF-Connecting-IP": ip},
+    )
+    assert r2.status_code == 200
+
+    state = client.get(f"/owner/{server.OWNER_TOKEN}/api/state").get_json()
+    # The two records from same remote IP + UA should be merged into 1 guest session
+    assert state["totals"]["sessions"] == 1
+    assert state["totals"]["files"] == 2
+    assert len(state["sessions"]) == 1
+    assert state["sessions"][0]["files"] == 2
+
+
+def test_test_probes_separated_from_guest_metrics(client):
+    """Automated test runners / probes do not inflate human guest counts."""
+    import server
+
+    # 1 real guest
+    guest_ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1"
+    r_guest = client.post(
+        f"/d/{server.TOKEN}/upload?batch=bb0000000001&name=guest.jpg",
+        data=b"guest-photo-bytes",
+        content_type="application/octet-stream",
+        headers={"User-Agent": guest_ua, "CF-Connecting-IP": "203.0.113.99"},
+    )
+    assert r_guest.status_code == 200
+
+    # 2 automated probes with curl and requests
+    client_curl = server.app.test_client()
+    r_curl = client_curl.post(
+        f"/d/{server.TOKEN}/upload?batch=bb0000000002&name=probe1.jpg",
+        data=b"curl-probe-bytes",
+        content_type="application/octet-stream",
+        headers={"User-Agent": "curl/8.4.0", "CF-Connecting-IP": "127.0.0.1"},
+    )
+    assert r_curl.status_code == 200
+
+    client_py = server.app.test_client()
+    r_py = client_py.post(
+        f"/d/{server.TOKEN}/upload?batch=bb0000000003&name=probe2.jpg",
+        data=b"requests-probe-bytes",
+        content_type="application/octet-stream",
+        headers={"User-Agent": "python-requests/2.31.0", "CF-Connecting-IP": "127.0.0.1"},
+    )
+    assert r_py.status_code == 200
+
+    state = client.get(f"/owner/{server.OWNER_TOKEN}/api/state").get_json()
+    # Human guest count remains 1, not 3!
+    assert state["totals"]["sessions"] == 1
+    assert state["totals"]["guest_sessions"] == 1
+    assert state["totals"]["test_sessions"] >= 1
+
+    health = client.get("/healthz", headers={"X-PD-Token": server.TOKEN}).get_json()
+    assert health["sessions"] == 1
+    assert health["guest_sessions"] == 1
+    assert health["test_sessions"] >= 1
