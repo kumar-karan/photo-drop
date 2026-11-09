@@ -1442,6 +1442,15 @@ def healthz():
         test_sessions = [s for s in sessions if s.get("is_test")]
         guest_count = len(guest_sessions)
         reported_sessions = guest_count if guest_count or not test_sessions else len(sessions)
+        with LEDGER_LOCK:
+            ledger = _load_ledger()
+        watermark = ledger.get("watermark") or ""
+        total_synced = len(ledger.get("files", {}))
+        if total_synced == 0 and DEST.exists():
+            try:
+                total_synced = len([f for f in DEST.iterdir() if f.is_file() and not f.name.startswith(".")])
+            except OSError:
+                pass
         return jsonify(
             ok=True,
             version=APP_VERSION,
@@ -1459,6 +1468,8 @@ def healthz():
             public_url=get_public_url(),
             lan_ip=get_lan_ip(),
             upload_stats=stats,
+            watermark=watermark,
+            total_synced=total_synced,
         )
     return jsonify(ok=True)
 
@@ -3428,6 +3439,7 @@ PAGE_UPLOAD = """<!DOCTYPE html>
     ];
 
     const BASE_SYNCED_OFFSET = 4802;
+    let activeXhr = null;
 
     const app = {
       items: JSON.parse(JSON.stringify(INITIAL_ITEMS)),
@@ -3436,6 +3448,8 @@ PAGE_UPLOAD = """<!DOCTYPE html>
       photoFilter: 'unsynced', // 'unsynced' | 'all'
       serverOnline: true,
       isSyncing: false,
+      isPaused: false,
+      showAllQueue: false,
       syncInterval: null,
       freeGB: 142.4,
       photosGB: 60.5,
@@ -3572,16 +3586,68 @@ PAGE_UPLOAD = """<!DOCTYPE html>
       renderAll();
     }
 
+    // --- Duplicate & Resume Diff Checker ---
+    async function checkServerDuplicates(itemsToCheck = null) {
+      const pool = itemsToCheck || app.items.filter(i => !i.synced);
+      if (!pool.length) return;
+
+      const candidateList = pool.map(i => ({
+        name: i.name,
+        size: i.file ? i.file.size : Math.round(i.sizeMB * 1024 * 1024)
+      }));
+
+      try {
+        const res = await fetch(`${BASE}/sync/diff`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ items: candidateList })
+        });
+        if (res.ok) {
+          const diff = await res.json();
+          const already = new Set(diff.already_synced || []);
+          if (already.size > 0) {
+            pool.forEach(i => {
+              if (already.has(i.name)) {
+                i.synced = true;
+                i.progress = 100;
+                i.selected = false;
+              }
+            });
+            renderAll();
+          }
+        }
+      } catch (_) {}
+    }
+
+    // --- Play / Pause Controls ---
+    function pauseTransfer() {
+      app.isPaused = true;
+      app.isSyncing = false;
+      if (activeXhr) {
+        try { activeXhr.abort(); } catch (_) {}
+        activeXhr = null;
+      }
+      renderAll();
+    }
+
+    function resumeTransfer() {
+      app.isPaused = false;
+      app.isSyncing = true;
+      startRealtimeSyncLoop();
+    }
+
+    function togglePlayPause() {
+      if (app.isSyncing) {
+        pauseTransfer();
+      } else {
+        resumeTransfer();
+      }
+    }
+
     // --- Trigger 1-Tap Catch-Up Sync Across Both Phones ---
     function triggerOneTapSync() {
       if (!app.serverOnline) {
         toggleServerOnline();
-      }
-
-      if (app.isSyncing) {
-        stopSyncTimer();
-        renderAll();
-        return;
       }
 
       const stats = getDeltaStats();
@@ -3590,9 +3656,13 @@ PAGE_UPLOAD = """<!DOCTYPE html>
         return;
       }
 
+      if (app.isSyncing) {
+        pauseTransfer();
+        return;
+      }
+
       switchIosTab('queue');
-      app.isSyncing = true;
-      startRealtimeSyncLoop( false );
+      resumeTransfer();
     }
 
     // --- Sync Only Selected Photos (Mode B) ---
@@ -3601,6 +3671,7 @@ PAGE_UPLOAD = """<!DOCTYPE html>
       if (selected.length === 0) return;
       switchIosTab('queue');
       switchSamsungTab('stream');
+      app.isPaused = false;
       app.isSyncing = true;
       startRealtimeSyncLoop( true );
     }
@@ -3618,15 +3689,17 @@ PAGE_UPLOAD = """<!DOCTYPE html>
       const timeStr = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
       const dateLabel = `Today • ${pad(now.getHours())}:${pad(now.getMinutes())}`;
 
+      const added = [];
       files.forEach((f, idx) => {
         const isRaw = f.name.toLowerCase().endsWith('.dng') || f.name.toLowerCase().endsWith('.raw');
         const isVideo = f.type.startsWith('video/') || f.name.toLowerCase().endsWith('.mov') || f.name.toLowerCase().endsWith('.mp4');
         const cat = isRaw ? 'raw' : (isVideo ? 'video' : 'photo');
         const sizeMB = Number((f.size / (1024 * 1024)).toFixed(1));
         const isImg = f.type.startsWith('image/');
-        const url = isImg ? URL.createObjectURL(f) : '';
+        // Lazy preview URLs: allocate only for first 30 images to keep memory small on 500+ batches
+        const url = (isImg && idx < 30) ? URL.createObjectURL(f) : '';
 
-        app.items.push({
+        const itemObj = {
           id: 'rf_' + Date.now() + '_' + idx,
           file: f,
           title: f.name.replace(/\\.[^/.]+$/, ""),
@@ -3641,11 +3714,16 @@ PAGE_UPLOAD = """<!DOCTYPE html>
           url: url,
           err: false,
           errMessage: ''
-        });
+        };
+        app.items.push(itemObj);
+        added.push(itemObj);
       });
 
       switchIosTab('queue');
       renderAll();
+
+      // Automatically query server sync diff to skip any files already backed up
+      checkServerDuplicates(added);
     }
 
     // --- Real File Picker Listener ---
@@ -3677,9 +3755,11 @@ PAGE_UPLOAD = """<!DOCTYPE html>
     async function uploadRealItem(item, sid) {
       let attempts = 0;
       while (attempts < 3) {
+        if (app.isPaused) throw new Error('Transfer paused');
         try {
           await new Promise((resolve, reject) => {
             const xhr = new XMLHttpRequest();
+            activeXhr = xhr;
             xhr.withCredentials = true;
             const url = `${BASE}/upload?batch=${BATCH}&name=${encodeURIComponent(item.name)}&sid=${encodeURIComponent(sid)}`;
 
@@ -3706,6 +3786,7 @@ PAGE_UPLOAD = """<!DOCTYPE html>
             };
 
             xhr.onload = () => {
+              activeXhr = null;
               if (xhr.status >= 200 && xhr.status < 300) {
                 try {
                   const res = JSON.parse(xhr.responseText || '{}');
@@ -3725,8 +3806,9 @@ PAGE_UPLOAD = """<!DOCTYPE html>
               }
             };
 
-            xhr.onerror = () => reject(new Error('Connection dropped. Check Wi-Fi.'));
-            xhr.ontimeout = () => reject(new Error('Upload timeout.'));
+            xhr.onerror = () => { activeXhr = null; reject(new Error('Connection dropped. Check Wi-Fi.')); };
+            xhr.ontimeout = () => { activeXhr = null; reject(new Error('Upload timeout.')); };
+            xhr.onabort = () => { activeXhr = null; reject(new Error('Transfer paused')); };
             xhr.timeout = 180000;
 
             xhr.open('POST', url);
@@ -3737,6 +3819,7 @@ PAGE_UPLOAD = """<!DOCTYPE html>
           });
           return; // Success!
         } catch (err) {
+          if (app.isPaused) throw err;
           attempts++;
           if (attempts >= 3) throw err;
           await new Promise(r => setTimeout(r, 1000 * attempts));
@@ -3821,7 +3904,7 @@ PAGE_UPLOAD = """<!DOCTYPE html>
       if (queuePool[1] && !queuePool[1].file) queuePool[1].progress = 35;
       renderAll();
 
-      while (app.isSyncing) {
+      while (app.isSyncing && !app.isPaused) {
         const remaining = app.items.filter(i => !i.synced && (!selectedOnly || i.selected));
         if (remaining.length === 0) {
           stopSyncTimer();
@@ -3846,6 +3929,10 @@ PAGE_UPLOAD = """<!DOCTYPE html>
             else if (current.category === 'raw') app.rawGB = Number((app.rawGB + gbDelta).toFixed(2));
             else app.photosGB = Number((app.photosGB + gbDelta).toFixed(2));
           } catch (err) {
+            if (app.isPaused) {
+              current.progress = 0;
+              break;
+            }
             current.err = true;
             current.errMessage = err.message || 'Failed';
             // Stop and let user retry or continue
@@ -3942,11 +4029,22 @@ PAGE_UPLOAD = """<!DOCTYPE html>
         return;
       }
 
+      if (app.isPaused) {
+        connector.textContent = `Transfer Paused • ${stats.unsyncedCount} Remaining`;
+        heroTitle.textContent = 'Transfer Paused';
+        heroDesc.textContent = `Tap below to resume streaming ${stats.unsyncedCount} photos (${stats.deltaMB} MB) to Samsung.`;
+        heroCtaText.textContent = `▶ Resume Backing Up (${stats.unsyncedCount} Left)`;
+        heroSpeed.classList.add('hidden');
+        bellDot.classList.remove('hidden');
+        islandText.textContent = 'PAUSED';
+        return;
+      }
+
       if (app.isSyncing) {
         connector.textContent = `Pushing ${stats.unsyncedCount} Left • ${stats.deltaMB} MB`;
         heroTitle.textContent = `Backing Up (${stats.unsyncedCount} Left)...`;
         heroDesc.textContent = `Streaming directly to Samsung S24 Ultra over local WireGuard tunnel.`;
-        heroCtaText.textContent = 'Pause 1-Tap Transfer';
+        heroCtaText.textContent = '⏸ Pause Transfer';
         heroSpeed.classList.remove('hidden');
         bellDot.classList.remove('hidden');
         islandText.textContent = `${stats.unsyncedCount} UP`;
@@ -4071,11 +4169,43 @@ PAGE_UPLOAD = """<!DOCTYPE html>
       const statusLabel = document.getElementById('ios-queue-status-label');
 
       badge.textContent = stats.unsyncedCount > 0 ? `${stats.unsyncedCount} remaining` : 'All Complete';
-      statusLabel.textContent = app.isSyncing ? 'In Progress' : (stats.unsyncedCount > 0 ? 'Pending Queue' : 'Completed');
+      statusLabel.textContent = app.isSyncing ? 'Streaming...' : (app.isPaused ? 'Paused' : (stats.unsyncedCount > 0 ? 'Pending' : 'Completed'));
 
-      const displayItems = stats.unsynced.length > 0
-        ? stats.unsynced
-        : stats.synced.slice().reverse();
+      const totalItems = app.items.length;
+      const syncedItems = app.items.filter(i => i.synced).length;
+      const totalMB = app.items.reduce((s, i) => s + i.sizeMB, 0).toFixed(1);
+      const syncedMB = app.items.filter(i => i.synced).reduce((s, i) => s + i.sizeMB, 0).toFixed(1);
+      const overallPct = totalItems > 0 ? Math.round((syncedItems / totalItems) * 100) : 0;
+
+      const batchCardHtml = `
+        <div class="bg-white rounded-2xl p-4 shadow-soft space-y-2.5 mb-3">
+          <div class="flex items-center justify-between text-xs font-extrabold text-zinc-900">
+            <span>Overall Queue (${syncedItems} of ${totalItems} synced)</span>
+            <span class="font-mono text-electric tabular-nums">${overallPct}% · ${syncedMB}/${totalMB} MB</span>
+          </div>
+          <div class="w-full h-2.5 rounded-full bg-zinc-100 overflow-hidden">
+            <div class="h-full bg-electric rounded-full transition-all duration-300" style="width: ${overallPct}%"></div>
+          </div>
+          <div class="flex items-center justify-between pt-1">
+            <button type="button" onclick="togglePlayPause()"
+              class="px-3.5 py-1.5 rounded-full text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs ${
+                app.isSyncing ? 'bg-amber-100 text-amber-900 hover:bg-amber-200' : 'bg-electric text-white hover:bg-blue-700'
+              }">
+              ${app.isSyncing ? '⏸ Pause' : (app.isPaused ? '▶ Resume' : '▶ Start Transfer')}
+            </button>
+            <button type="button" onclick="checkServerDuplicates()"
+              class="px-2.5 py-1.5 rounded-full bg-zinc-100 hover:bg-zinc-200 text-[11px] font-bold text-zinc-600 flex items-center gap-1 transition-all"
+              title="Query Samsung for already-synced files and skip them">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+              <span>Smart Resume Check</span>
+            </button>
+          </div>
+        </div>
+      `;
+
+      const allItems = stats.unsynced.length > 0 ? stats.unsynced : stats.synced.slice().reverse();
+      const limit = app.showAllQueue ? allItems.length : 40;
+      const displayItems = allItems.slice(0, limit);
 
       const pastelPalette = [
         { bg: 'bg-[#FFF1B8]', text: 'text-amber-800' },
@@ -4084,9 +4214,14 @@ PAGE_UPLOAD = """<!DOCTYPE html>
         { bg: 'bg-[#DFF2E6]', text: 'text-emerald-800' }
       ];
 
-      container.innerHTML = displayItems.map((item, idx) => {
+      const listHtml = displayItems.map((item, idx) => {
         const tone = pastelPalette[idx % pastelPalette.length];
         const pct = item.synced ? 100 : (item.progress || (idx === 0 && app.isSyncing ? 80 : idx === 1 && app.isSyncing ? 45 : 0));
+        let itemStatus = 'Waiting';
+        if (item.synced) itemStatus = 'Saved to Samsung S24';
+        else if (item.err) itemStatus = item.errMessage || 'Error · Tap to retry';
+        else if (app.isSyncing && idx === 0) itemStatus = 'Uploading...';
+        else if (app.isPaused) itemStatus = 'Paused';
 
         return `
           <div class="bg-white rounded-2xl p-3 flex items-center justify-between gap-2 shadow-soft">
@@ -4101,7 +4236,7 @@ PAGE_UPLOAD = """<!DOCTYPE html>
               <div class="min-w-0">
                 <div class="text-xs font-extrabold text-zinc-900 truncate">${item.name}</div>
                 <div class="text-[10px] font-medium text-zinc-400 tabular-nums">
-                  ${item.synced ? 'Saved to Samsung S24' : `${item.sizeMB} MB • ${app.isSyncing ? 'Uploading' : 'Waiting'}`}
+                  ${item.sizeMB} MB • ${itemStatus}
                 </div>
               </div>
             </div>
@@ -4127,6 +4262,18 @@ PAGE_UPLOAD = """<!DOCTYPE html>
           </div>
         `;
       }).join('');
+
+      let toggleAllHtml = '';
+      if (allItems.length > 40 && !app.showAllQueue) {
+        toggleAllHtml = `
+          <button type="button" onclick="app.showAllQueue=true; renderAll();"
+            class="w-full py-2.5 rounded-xl bg-white border border-zinc-200 text-xs font-bold text-zinc-700 hover:bg-zinc-50 shadow-xs">
+            Show all ${allItems.length} queued files
+          </button>
+        `;
+      }
+
+      container.innerHTML = batchCardHtml + listHtml + toggleAllHtml;
     }
 
     async function syncSingleItemNow(id) {

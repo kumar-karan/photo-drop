@@ -531,7 +531,11 @@ public class MainActivity extends Activity {
             }
             tvTransferFiles.setText(sb.toString());
         } else {
-            tvSessions.setText(h.sessions + (h.sessions == 1 ? " SESSION" : " SESSIONS"));
+            String sessLabel = h.sessions + (h.sessions == 1 ? " SESSION" : " SESSIONS");
+            if (h.totalSynced > 0) {
+                sessLabel = h.totalSynced + " SYNCED · " + sessLabel;
+            }
+            tvSessions.setText(sessLabel);
             tvSessions.setBackgroundResource(h.sessions > 0 ? R.drawable.pill_success : R.drawable.pill_neutral);
             tvSessions.setTextColor(h.sessions > 0 ? getColor(R.color.success) : getColor(R.color.text_muted));
 

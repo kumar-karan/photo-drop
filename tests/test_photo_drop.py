@@ -975,3 +975,36 @@ def test_sync_status_and_diff_endpoints(client):
     assert diff_data["ok"] is True
     assert "vacation_sunset.jpg" in diff_data["already_synced"]
     assert "unsynced_photo.jpg" in diff_data["need_upload"]
+
+
+def test_500_photos_batch_diff_and_resume(client):
+    """Verify handling of a 500-photo batch, pause/resume diffing, and reconnection."""
+    import server
+
+    token = server.TOKEN
+    batch_500 = [{"name": f"VACATION_{i:04d}.JPG", "size": 1024} for i in range(500)]
+
+    # 1. Initially all 500 photos are need_upload
+    r1 = client.post(f"/d/{token}/sync/diff", json={"items": batch_500})
+    assert r1.status_code == 200
+    d1 = r1.get_json()
+    assert len(d1["need_upload"]) == 500
+    assert len(d1["already_synced"]) == 0
+
+    # 2. Simulate uploading 25 photos before pausing/disconnecting
+    bid = "bc0055443322"
+    for item in batch_500[:25]:
+        u_res = client.post(
+            f"/d/{token}/upload?batch={bid}&name={item['name']}",
+            data=b"x" * 1024,
+            content_type="application/octet-stream",
+        )
+        assert u_res.status_code == 200
+
+    # 3. Simulate user reconnecting or resuming: re-check diff for all 500 photos
+    r2 = client.post(f"/d/{token}/sync/diff", json={"items": batch_500})
+    assert r2.status_code == 200
+    d2 = r2.get_json()
+    assert len(d2["already_synced"]) == 25, f"Expected 25 already synced, got {len(d2['already_synced'])}"
+    assert len(d2["need_upload"]) == 475, f"Expected 475 need upload, got {len(d2['need_upload'])}"
+    assert d2["total_synced"] >= 25

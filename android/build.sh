@@ -48,6 +48,7 @@ else
   ZIP="$PWD/cmdline-tools.zip"
   echo "  fetching $URL"
   curl -fL "$URL" -o "$ZIP"
+  unzip -q -o "$ZIP"
   for d in cmdline-tools/*; do [ -d "$d" ] && mv "$d" latest; done
   [ -d cmdline-tools/cmdline-tools ] && mv cmdline-tools/cmdline-tools latest
   rm -f "$ZIP"

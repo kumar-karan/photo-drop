@@ -27,12 +27,15 @@ public final class Health {
     public final List<String> inFlightFiles;
     public final int recentCount;
     public final List<String> recentFiles;
+    public final String watermark;
+    public final int totalSynced;
 
     public Health(boolean up, long free, long total, long reserve, int sessions,
                   String publicUrl, String lanIp,
                   boolean isUploading, boolean isActive, int uploadersCount,
                   int inFlightCount, List<String> inFlightFiles,
-                  int recentCount, List<String> recentFiles) {
+                  int recentCount, List<String> recentFiles,
+                  String watermark, int totalSynced) {
         this.up = up;
         this.free = free;
         this.total = total;
@@ -47,10 +50,12 @@ public final class Health {
         this.inFlightFiles = inFlightFiles != null ? Collections.unmodifiableList(inFlightFiles) : Collections.emptyList();
         this.recentCount = recentCount;
         this.recentFiles = recentFiles != null ? Collections.unmodifiableList(recentFiles) : Collections.emptyList();
+        this.watermark = watermark != null ? watermark.trim() : "";
+        this.totalSynced = totalSynced;
     }
 
     public static Health down() {
-        return new Health(false, -1, -1, -1, 0, "", "", false, false, 0, 0, Collections.emptyList(), 0, Collections.emptyList());
+        return new Health(false, -1, -1, -1, 0, "", "", false, false, 0, 0, Collections.emptyList(), 0, Collections.emptyList(), "", 0);
     }
 
     public static Health parse(String body) {
@@ -98,8 +103,12 @@ public final class Health {
                 }
             }
 
+            String watermark = j.optString("watermark", "");
+            int totalSynced = j.optInt("total_synced", 0);
+
             return new Health(ok, free, total, reserve, sessions, pubUrl, lan,
-                    isUploading, isActive, uploaders, inFlightCount, inFlightFiles, recentCount, recentFiles);
+                    isUploading, isActive, uploaders, inFlightCount, inFlightFiles, recentCount, recentFiles,
+                    watermark, totalSynced);
         } catch (Exception e) {
             return down();
         }
