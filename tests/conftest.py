@@ -44,8 +44,12 @@ def ensure_dirs(tmp_path):
     server._ACTIVE_TRANSFERS.clear()
     server._RECENT_UPLOADS.clear()
     server._SESSION_META.clear()
+    server._SESSIONS_CACHE = None
+    server._LEDGER_CACHE = None
+    server._BATCH_OWNERS.clear()
     server.SESSIONS.unlink(missing_ok=True)
     server.SESSION_META_FILE.unlink(missing_ok=True)
+    server.SYNC_LEDGER_FILE.unlink(missing_ok=True)
     # Clean stale parts
     for p in list(DEST.glob(".*.part")):
         p.unlink(missing_ok=True)

@@ -926,3 +926,52 @@ def test_test_probes_separated_from_guest_metrics(client):
     assert health["sessions"] == 1
     assert health["guest_sessions"] == 1
     assert health["test_sessions"] >= 1
+
+
+def test_sync_status_and_diff_endpoints(client):
+    import server
+
+    # 1. Unauthenticated requests are rejected
+    assert client.get("/d/wrong_token/sync/status").status_code == 404
+    assert client.post("/d/wrong_token/sync/diff", json={"items": []}).status_code in (404, 411)
+
+    token = server.TOKEN
+    # 2. Authenticated sync status returns initial ledger
+    res = client.get(f"/d/{token}/sync/status")
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["ok"] is True
+    assert "watermark" in data
+    assert "usable" in data
+    assert data["total_synced"] == 0
+
+    # 3. Upload a file and verify watermark/ledger updates
+    upload_res = client.post(
+        f"/d/{token}/upload?batch=aa0011223344&name=vacation_sunset.jpg",
+        data=b"photo-bytes-content-1234",
+        content_type="application/octet-stream",
+    )
+    assert upload_res.status_code == 200
+
+    # Re-check sync status: total_synced incremented
+    res2 = client.get(f"/d/{token}/sync/status")
+    assert res2.status_code == 200
+    data2 = res2.get_json()
+    assert data2["total_synced"] == 1
+    assert data2["watermark"] != ""
+
+    # 4. Check sync/diff endpoint
+    diff_res = client.post(
+        f"/d/{token}/sync/diff",
+        json={
+            "items": [
+                {"name": "vacation_sunset.jpg", "size": len(b"photo-bytes-content-1234")},
+                {"name": "unsynced_photo.jpg", "size": 9999},
+            ]
+        },
+    )
+    assert diff_res.status_code == 200
+    diff_data = diff_res.get_json()
+    assert diff_data["ok"] is True
+    assert "vacation_sunset.jpg" in diff_data["already_synced"]
+    assert "unsynced_photo.jpg" in diff_data["need_upload"]

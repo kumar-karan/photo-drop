@@ -540,21 +540,88 @@ SESSION_META_FILE = HOME / "session-meta.json"
 # Upper bound on the store so a long-running phone can't grow it forever.
 MAX_SESSIONS = 200
 
+_SESSIONS_CACHE: dict[str, int] | None = None
+
 
 def _load_sessions() -> dict:
+    global _SESSIONS_CACHE
     if not SESSIONS.exists():
+        _SESSIONS_CACHE = {}
         return {}
     try:
-        return json.loads(SESSIONS.read_text())
+        data = json.loads(SESSIONS.read_text())
+        if isinstance(data, dict):
+            _SESSIONS_CACHE = data
+            return data
     except (json.JSONDecodeError, OSError):
-        return {}
+        pass
+    if _SESSIONS_CACHE is not None:
+        return dict(_SESSIONS_CACHE)
+    return {}
 
 
 def _save_sessions(data: dict):
+    global _SESSIONS_CACHE
+    _SESSIONS_CACHE = dict(data)
     # Atomic write so an ungraceful shutdown cannot leave a half-written JSON.
-    tmp = SESSIONS.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data))
-    tmp.replace(SESSIONS)
+    try:
+        tmp = SESSIONS.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data))
+        tmp.replace(SESSIONS)
+    except OSError as exc:
+        log(f"could not persist sessions: {exc}")
+
+
+# --------------------------------------------------------------------------
+# high-watermark sync ledger
+# --------------------------------------------------------------------------
+
+SYNC_LEDGER_FILE = HOME / "sync_ledger.json"
+LEDGER_LOCK = threading.Lock()
+_LEDGER_CACHE: dict | None = None
+
+
+def _load_ledger() -> dict:
+    global _LEDGER_CACHE
+    if not SYNC_LEDGER_FILE.exists():
+        _LEDGER_CACHE = {"watermark": "", "files": {}}
+        return _LEDGER_CACHE
+    try:
+        data = json.loads(SYNC_LEDGER_FILE.read_text())
+        if isinstance(data, dict):
+            data.setdefault("watermark", "")
+            data.setdefault("files", {})
+            _LEDGER_CACHE = data
+            return data
+    except (json.JSONDecodeError, OSError):
+        pass
+    if _LEDGER_CACHE is not None:
+        return _LEDGER_CACHE
+    return {"watermark": "", "files": {}}
+
+
+def _save_ledger(data: dict):
+    global _LEDGER_CACHE
+    _LEDGER_CACHE = data
+    try:
+        tmp = SYNC_LEDGER_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data))
+        tmp.replace(SYNC_LEDGER_FILE)
+    except OSError as exc:
+        log(f"could not persist sync ledger: {exc}")
+
+
+def record_ledger_entry(name: str, original: str, size: int):
+    with LEDGER_LOCK:
+        ledger = _load_ledger()
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        ledger["watermark"] = now_str
+        ledger["files"][original] = {
+            "name": name,
+            "size": size,
+            "synced_at": now_str,
+        }
+        _save_ledger(ledger)
 
 
 def _load_session_meta() -> dict:
@@ -596,10 +663,16 @@ def session_valid(sid: str) -> bool:
     if not sid or len(sid) < 16:
         return False
     with SESSION_LOCK:
-        s = _load_sessions()
+        if _SESSIONS_CACHE is None:
+            s = _load_sessions()
+        else:
+            s = _SESSIONS_CACHE
         created = s.get(sid)
         if not created:
-            return False
+            s = _load_sessions()
+            created = s.get(sid)
+            if not created:
+                return False
         if time.time() - created > SESSION_TTL:
             s.pop(sid, None)
             _save_sessions(s)
@@ -647,6 +720,8 @@ def require_drop_token() -> tuple[str, bool]:
         note_session(sid)
         return sid, False
 
+    log(f"NEW_SESSION_MINTED: incoming_cookie={request.cookies.get(COOKIE)} sid={sid} view_args={request.view_args}")
+
     candidate = request.view_args.get("token", "") if request.view_args else ""
     if not candidate:
         candidate = request.headers.get("X-PD-Token", "")
@@ -659,6 +734,10 @@ def require_drop_token() -> tuple[str, bool]:
     abort(404)
 
 
+BATCH_LOCK = threading.Lock()
+_BATCH_OWNERS: dict[str, str] = {}
+
+
 def batch_owned_by(bid: str, sid: str) -> bool:
     """True if this session created the batch, or has not claimed it yet.
 
@@ -666,18 +745,34 @@ def batch_owned_by(bid: str, sid: str) -> bool:
     one is off-limits. This is what stops the per-session file cap from being
     reset by simply inventing a new batch id.
     """
-    marker = batch_dir(bid) / "owner"
-    try:
-        owner = marker.read_text().strip()
-    except OSError:
+    with BATCH_LOCK:
+        cached = _BATCH_OWNERS.get(bid)
+        if cached is not None:
+            return cached == sid
+        marker = batch_dir(bid) / "owner"
+        try:
+            owner = marker.read_text().strip()
+            if owner:
+                _BATCH_OWNERS[bid] = owner
+                return owner == sid
+        except OSError:
+            return True
         return True
-    return owner == sid
 
 
 def claim_batch(bid: str, sid: str):
-    marker = batch_dir(bid) / "owner"
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(sid)
+    with BATCH_LOCK:
+        _BATCH_OWNERS[bid] = sid
+        marker = batch_dir(bid) / "owner"
+        if marker.exists():
+            return
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            tmp = marker.with_suffix(".tmp")
+            tmp.write_text(sid)
+            tmp.replace(marker)
+        except OSError as exc:
+            log(f"could not persist batch owner for {bid}: {exc}")
 
 
 # --------------------------------------------------------------------------
@@ -1468,6 +1563,73 @@ def drop_status(token: str):
     return resp
 
 
+@app.get("/d/<token>/sync/status")
+def sync_status(token: str):
+    sid, is_new = require_drop_token()
+    with LEDGER_LOCK:
+        ledger = _load_ledger()
+    free = disk_free()
+    total_stored = len(ledger.get("files", {}))
+    if total_stored == 0 and DEST.exists():
+        try:
+            total_stored = len([f for f in DEST.iterdir() if f.is_file() and not f.name.startswith(".")])
+        except OSError:
+            pass
+
+    watermark = ledger.get("watermark")
+    if not watermark:
+        watermark = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+    resp = jsonify(
+        ok=True,
+        watermark=watermark,
+        total_synced=total_stored,
+        free=free,
+        free_human=human(free),
+        usable=max(0, free - RESERVE_BYTES),
+        version=APP_VERSION,
+        session=sid[:6],
+    )
+    if is_new:
+        set_session_cookie(resp, sid)
+    return resp
+
+
+@app.post("/d/<token>/sync/diff")
+def sync_diff(token: str):
+    sid, is_new = require_drop_token()
+    req_data = request.get_json(silent=True) or {}
+    candidates = req_data.get("items") or []
+
+    with LEDGER_LOCK:
+        ledger = _load_ledger()
+    ledger_files = ledger.get("files", {})
+
+    already_synced = []
+    need_upload = []
+
+    for item in candidates:
+        name = item.get("name") or ""
+        size = item.get("size") or 0
+        if name in ledger_files:
+            already_synced.append(name)
+        elif DEST.exists() and (DEST / name).exists() and (DEST / name).stat().st_size == size:
+            already_synced.append(name)
+        else:
+            need_upload.append(name)
+
+    resp = jsonify(
+        ok=True,
+        watermark=ledger.get("watermark") or "",
+        total_synced=len(ledger_files),
+        already_synced=already_synced,
+        need_upload=need_upload,
+    )
+    if is_new:
+        set_session_cookie(resp, sid)
+    return resp
+
+
 @app.post("/d/<token>/upload")
 def upload(token: str):
     """Receive one file as the raw request body.
@@ -1483,6 +1645,7 @@ def upload(token: str):
     if not re.fullmatch(r"[a-f0-9]{6,32}", bid):
         abort(400)
     if not batch_owned_by(bid, sid):
+        log(f"forbidden: batch {bid} not owned by session {sid}")
         abort(403)
     if session_file_count(sid) >= MAX_FILES_PER_SESSION:
         return jsonify(ok=False, error="session file limit reached"), 409
@@ -1546,6 +1709,7 @@ def upload(token: str):
         # Record upload and notify MediaProvider in background to avoid blocking
         # upload slots or timing out over mobile tunnels.
         record_upload(bid, name, original, written, "pending")
+        record_ledger_entry(name, original, written)
         saved = True
         log(f"saved {original} -> {name} ({written}B)")
         try:
@@ -2407,15 +2571,66 @@ PAGE_UPLOAD = """<!DOCTYPE html>
     .animate-float {
       animation: floatPulse 3s ease-in-out infinite;
     }
+    @media (max-width: 768px) {
+      .studio-header {
+        display: none !important;
+      }
+      .studio-main {
+        padding: 0 !important;
+        margin: 0 !important;
+        max-width: 100% !important;
+        width: 100% !important;
+      }
+      .device-shell {
+        height: calc(100vh - 48px) !important;
+        height: calc(100dvh - 48px) !important;
+        border-radius: 0 !important;
+        box-shadow: none !important;
+        max-width: 100% !important;
+        width: 100% !important;
+        border: none !important;
+      }
+      .device-label {
+        display: none !important;
+      }
+      .ios-hardware-bar {
+        display: none !important;
+      }
+      .mobile-top-bar {
+        display: flex !important;
+      }
+      #frame-iphone, #frame-samsung {
+        max-width: 100% !important;
+        width: 100% !important;
+      }
+    }
+    @media (min-width: 769px) {
+      .mobile-top-bar {
+        display: none !important;
+      }
+    }
   </style>
 </head>
 <body class="bg-board text-zinc-900 font-sans antialiased min-h-screen flex flex-col selection:bg-electric selection:text-white">
   <input type="file" id="real-file-picker" multiple accept="image/*,video/*" style="display:none;" />
 
+  <!-- Mobile Top Switcher Bar (Shown only on small screens) -->
+  <div class="mobile-top-bar w-full py-2.5 px-4 bg-white/90 backdrop-blur-md border-b border-zinc-200/80 flex items-center justify-between z-30 sticky top-0">
+    <div class="flex items-center gap-2">
+      <div class="w-7 h-7 rounded-full bg-electric text-white flex items-center justify-center font-extrabold text-xs shadow-xs">PD</div>
+      <span class="text-xs font-bold text-zinc-900">PhotoDrop</span>
+      <span id="mobile-pill-free" class="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-zinc-100 text-zinc-600">Sync</span>
+    </div>
+    <div class="bg-zinc-100 p-0.5 rounded-full flex items-center">
+      <button type="button" onclick="setViewportMode('iphone')" id="m-btn-iphone" class="px-3 py-1 rounded-full text-[11px] font-bold bg-white text-zinc-900 shadow-xs transition-all">iPhone PWA</button>
+      <button type="button" onclick="setViewportMode('samsung')" id="m-btn-samsung" class="px-3 py-1 rounded-full text-[11px] font-bold text-zinc-500 transition-all">Samsung APK</button>
+    </div>
+  </div>
+
   <!-- ========================================================================= -->
   <!-- QUIET STUDIO PRESENTATION BAR                                             -->
   <!-- ========================================================================= -->
-  <header class="w-full max-w-6xl mx-auto px-4 pt-5 pb-2 flex flex-wrap items-center justify-between gap-3">
+  <header class="studio-header w-full max-w-6xl mx-auto px-4 pt-5 pb-2 flex flex-wrap items-center justify-between gap-3">
     <div class="flex items-center gap-3">
       <div class="w-9 h-9 rounded-full bg-electric text-white flex items-center justify-center font-extrabold text-sm shadow-sm">
         PD
@@ -2448,9 +2663,9 @@ PAGE_UPLOAD = """<!DOCTYPE html>
 
       <button type="button" onclick="pickRealPhotos()"
         class="px-3.5 py-2 rounded-full bg-white hover:bg-zinc-50 active:scale-95 text-xs font-bold text-zinc-800 shadow-xs flex items-center gap-1.5 transition-all"
-        title="Simulate taking a new photo on iPhone 17 Pro">
+        title="Pick photos and videos from your camera roll">
         <span class="w-2 h-2 rounded-full bg-electric"></span>
-        <span>+ Capture Photo on iPhone</span>
+        <span>+ Choose Photos</span>
       </button>
 
       <button type="button" onclick="resetDemoState()"
@@ -2463,14 +2678,14 @@ PAGE_UPLOAD = """<!DOCTYPE html>
   <!-- ========================================================================= -->
   <!-- DUAL PHONE PRESENTATION STAGE                                             -->
   <!-- ========================================================================= -->
-  <main class="flex-1 w-full max-w-6xl mx-auto px-4 py-5 flex flex-col lg:flex-row items-center lg:items-start justify-center gap-8 lg:gap-12">
+  <main class="studio-main flex-1 w-full max-w-6xl mx-auto px-4 py-5 flex flex-col lg:flex-row items-center lg:items-start justify-center gap-8 lg:gap-12">
 
     <!-- ======================================================================= -->
     <!-- DEVICE 1: APPLE IPHONE 17 PRO (PWA SENDER CLIENT)                       -->
     <!-- ======================================================================= -->
     <section id="frame-iphone" aria-label="iPhone 17 Pro PWA Client" class="w-full max-w-[380px] flex flex-col items-center">
       <!-- Subtle Device Label Above Phone -->
-      <div class="mb-3 flex items-center gap-2">
+      <div class="device-label mb-3 flex items-center gap-2">
         <span class="px-3 py-1 rounded-full bg-white/80 text-[11px] font-bold tracking-wide uppercase text-zinc-700 shadow-xs">
           iOS Safari PWA &bull; Sender
         </span>
@@ -2478,10 +2693,10 @@ PAGE_UPLOAD = """<!DOCTYPE html>
       </div>
 
       <!-- Phone Hardware Shell -->
-      <div class="w-full h-[790px] bg-appbg rounded-[46px] shadow-phone relative overflow-hidden flex flex-col justify-between select-none">
+      <div class="device-shell w-full h-[790px] bg-appbg rounded-[46px] shadow-phone relative overflow-hidden flex flex-col justify-between select-none">
         
         <!-- Top iOS Status Bar + Dynamic Island -->
-        <div class="px-7 pt-3.5 pb-2 flex items-center justify-between text-xs font-bold text-zinc-900 z-20">
+        <div class="ios-hardware-bar px-7 pt-3.5 pb-2 flex items-center justify-between text-xs font-bold text-zinc-900 z-20">
           <span class="tabular-nums">11:30</span>
           <!-- Dynamic Island -->
           <div class="w-24 h-6 bg-pillnav rounded-full flex items-center justify-between px-2.5">
@@ -2823,7 +3038,7 @@ PAGE_UPLOAD = """<!DOCTYPE html>
     <!-- ======================================================================= -->
     <section id="frame-samsung" aria-label="Samsung S24 Ultra Android APK Server" class="w-full max-w-[380px] flex flex-col items-center">
       <!-- Subtle Device Label Above Phone -->
-      <div class="mb-3 flex items-center gap-2">
+      <div class="device-label mb-3 flex items-center gap-2">
         <span class="px-3 py-1 rounded-full bg-pillnav text-white text-[11px] font-bold tracking-wide uppercase shadow-xs">
           Android APK &bull; Receiver Server
         </span>
@@ -2831,10 +3046,10 @@ PAGE_UPLOAD = """<!DOCTYPE html>
       </div>
 
       <!-- Samsung S24 Ultra Hardware Shell (Slightly sharper corners + punch-hole camera) -->
-      <div class="w-full h-[790px] bg-appbg rounded-[38px] shadow-phone relative overflow-hidden flex flex-col justify-between select-none">
+      <div class="device-shell w-full h-[790px] bg-appbg rounded-[38px] shadow-phone relative overflow-hidden flex flex-col justify-between select-none">
         
         <!-- Top Android Status Bar + Punch Hole Camera -->
-        <div class="px-6 pt-3.5 pb-2 flex items-center justify-between text-xs font-bold text-zinc-900 z-20">
+        <div class="ios-hardware-bar px-6 pt-3.5 pb-2 flex items-center justify-between text-xs font-bold text-zinc-900 z-20">
           <span class="tabular-nums">11:30</span>
           <!-- S24 Punch-Hole Camera -->
           <div class="w-3.5 h-3.5 rounded-full bg-pillnav flex items-center justify-center">
@@ -3176,7 +3391,12 @@ PAGE_UPLOAD = """<!DOCTYPE html>
   <script>
     const BASE = "{{BASE}}";
     const TOKEN = "{{TOKEN}}";
-    const BATCH = (Math.random().toString(36).slice(2, 8) + Date.now().toString(36)).slice(0, 12);
+    function randomHex(len) {
+      const arr = new Uint8Array(Math.ceil(len / 2));
+      crypto.getRandomValues(arr);
+      return Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, len);
+    }
+    const BATCH = randomHex(12);
 
     function pickRealPhotos() {
       const picker = document.getElementById('real-file-picker');
@@ -3252,26 +3472,36 @@ PAGE_UPLOAD = """<!DOCTYPE html>
     function setViewportMode(mode) {
       const iphone = document.getElementById('frame-iphone');
       const samsung = document.getElementById('frame-samsung');
+      const mIphone = document.getElementById('m-btn-iphone');
+      const mSamsung = document.getElementById('m-btn-samsung');
       const modes = ['both', 'iphone', 'samsung'];
 
       modes.forEach(m => {
         const btn = document.getElementById(`view-btn-${m}`);
-        if (m === mode) {
-          btn.className = 'px-3.5 py-1.5 rounded-full text-xs font-bold bg-pillnav text-white transition-all';
-        } else {
-          btn.className = 'px-3.5 py-1.5 rounded-full text-xs font-semibold text-zinc-600 hover:text-zinc-900 transition-all';
+        if (btn) {
+          if (m === mode) {
+            btn.className = 'px-3.5 py-1.5 rounded-full text-xs font-bold bg-pillnav text-white transition-all';
+          } else {
+            btn.className = 'px-3.5 py-1.5 rounded-full text-xs font-semibold text-zinc-600 hover:text-zinc-900 transition-all';
+          }
         }
       });
 
       if (mode === 'both') {
-        iphone.classList.remove('hidden');
-        samsung.classList.remove('hidden');
+        if (iphone) iphone.classList.remove('hidden');
+        if (samsung) samsung.classList.remove('hidden');
+        if (mIphone) mIphone.className = 'px-3 py-1 rounded-full text-[11px] font-bold bg-white text-zinc-900 shadow-xs transition-all';
+        if (mSamsung) mSamsung.className = 'px-3 py-1 rounded-full text-[11px] font-bold text-zinc-500 transition-all';
       } else if (mode === 'iphone') {
-        iphone.classList.remove('hidden');
-        samsung.classList.add('hidden');
+        if (iphone) iphone.classList.remove('hidden');
+        if (samsung) samsung.classList.add('hidden');
+        if (mIphone) mIphone.className = 'px-3 py-1 rounded-full text-[11px] font-bold bg-white text-zinc-900 shadow-xs transition-all';
+        if (mSamsung) mSamsung.className = 'px-3 py-1 rounded-full text-[11px] font-bold text-zinc-500 transition-all';
       } else {
-        iphone.classList.add('hidden');
-        samsung.classList.remove('hidden');
+        if (iphone) iphone.classList.add('hidden');
+        if (samsung) samsung.classList.remove('hidden');
+        if (mIphone) mIphone.className = 'px-3 py-1 rounded-full text-[11px] font-bold text-zinc-500 transition-all';
+        if (mSamsung) mSamsung.className = 'px-3 py-1 rounded-full text-[11px] font-bold bg-white text-zinc-900 shadow-xs transition-all';
       }
     }
 
@@ -3356,13 +3586,11 @@ PAGE_UPLOAD = """<!DOCTYPE html>
 
       const stats = getDeltaStats();
       if (stats.unsyncedCount === 0) {
-        // Already caught up: show stream verification
-        switchSamsungTab('stream');
-        renderAll();
+        pickRealPhotos();
         return;
       }
 
-      // Switch Samsung to Incoming Stream or keep Home visible while syncing
+      switchIosTab('queue');
       app.isSyncing = true;
       startRealtimeSyncLoop( false );
     }
@@ -3377,51 +3605,73 @@ PAGE_UPLOAD = """<!DOCTYPE html>
       startRealtimeSyncLoop( true );
     }
 
-    
+    function handleFilesSelected(files) {
+      if (!files || !files.length) return;
+
+      // When picking real files, remove sample demo items
+      if (app.items.some(i => !i.file)) {
+        app.items = app.items.filter(i => i.file);
+      }
+
+      const now = new Date();
+      const pad = n => String(n).padStart(2, '0');
+      const timeStr = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+      const dateLabel = `Today • ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+
+      files.forEach((f, idx) => {
+        const isRaw = f.name.toLowerCase().endsWith('.dng') || f.name.toLowerCase().endsWith('.raw');
+        const isVideo = f.type.startsWith('video/') || f.name.toLowerCase().endsWith('.mov') || f.name.toLowerCase().endsWith('.mp4');
+        const cat = isRaw ? 'raw' : (isVideo ? 'video' : 'photo');
+        const sizeMB = Number((f.size / (1024 * 1024)).toFixed(1));
+        const isImg = f.type.startsWith('image/');
+        const url = isImg ? URL.createObjectURL(f) : '';
+
+        app.items.push({
+          id: 'rf_' + Date.now() + '_' + idx,
+          file: f,
+          title: f.name.replace(/\\.[^/.]+$/, ""),
+          name: f.name,
+          category: cat,
+          sizeMB: sizeMB || 0.1,
+          dateLabel: dateLabel,
+          capturedAt: `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${timeStr}`,
+          synced: false,
+          selected: true,
+          progress: 0,
+          url: url,
+          err: false,
+          errMessage: ''
+        });
+      });
+
+      switchIosTab('queue');
+      renderAll();
+    }
+
     // --- Real File Picker Listener ---
     document.addEventListener('DOMContentLoaded', () => {
       const picker = document.getElementById('real-file-picker');
       if (picker) {
         picker.addEventListener('change', (e) => {
-          const files = Array.from(picker.files || []);
-          if (!files.length) return;
-
-          const now = new Date();
-          const pad = n => String(n).padStart(2, '0');
-          const timeStr = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
-          const dateLabel = `Today • ${pad(now.getHours())}:${pad(now.getMinutes())}`;
-
-          files.forEach((f, idx) => {
-            const isRaw = f.name.toLowerCase().endsWith('.dng') || f.name.toLowerCase().endsWith('.raw');
-            const isVideo = f.type.startsWith('video/') || f.name.toLowerCase().endsWith('.mov') || f.name.toLowerCase().endsWith('.mp4');
-            const cat = isRaw ? 'raw' : (isVideo ? 'video' : 'photo');
-            const sizeMB = Number((f.size / (1024 * 1024)).toFixed(1));
-            const isImg = f.type.startsWith('image/');
-            const url = isImg ? URL.createObjectURL(f) : '';
-
-            app.items.push({
-              id: 'rf_' + Date.now() + '_' + idx,
-              file: f,
-              title: f.name.replace(/\\.[^/.]+$/, ""),
-              name: f.name,
-              category: cat,
-              sizeMB: sizeMB || 0.1,
-              dateLabel: dateLabel,
-              capturedAt: `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${timeStr}`,
-              synced: false,
-              selected: true,
-              progress: 0,
-              url: url,
-              err: false,
-              errMessage: ''
-            });
-          });
-
+          handleFilesSelected(Array.from(picker.files || []));
           picker.value = '';
-          switchIosTab('queue');
-          renderAll();
         });
       }
+
+      window.addEventListener('dragover', (e) => { e.preventDefault(); });
+      window.addEventListener('drop', (e) => {
+        e.preventDefault();
+        if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+          handleFilesSelected(Array.from(e.dataTransfer.files));
+        }
+      });
+
+      if (window.innerWidth <= 768) {
+        setViewportMode('iphone');
+      }
+
+      pollServerStatus();
+      setInterval(pollServerStatus, 3000);
     });
 
     async function uploadRealItem(item, sid) {
@@ -3433,6 +3683,7 @@ PAGE_UPLOAD = """<!DOCTYPE html>
             xhr.withCredentials = true;
             const url = `${BASE}/upload?batch=${BATCH}&name=${encodeURIComponent(item.name)}&sid=${encodeURIComponent(sid)}`;
 
+            const startTime = Date.now();
             xhr.upload.onprogress = (e) => {
               if (e.lengthComputable && e.total > 0) {
                 const pct = Math.min(99, Math.round((e.loaded / e.total) * 100));
@@ -3441,6 +3692,16 @@ PAGE_UPLOAD = """<!DOCTYPE html>
                 const pctEl = document.getElementById(`prog-pct-${item.id}`);
                 if (fill) fill.style.width = pct + '%';
                 if (pctEl) pctEl.textContent = pct + '%';
+
+                const elapsed = (Date.now() - startTime) / 1000;
+                if (elapsed > 0.2) {
+                  const mbSec = (e.loaded / (1024 * 1024)) / elapsed;
+                  const speedEl = document.getElementById('ios-hero-speed');
+                  if (speedEl) {
+                    speedEl.classList.remove('hidden');
+                    speedEl.textContent = mbSec.toFixed(1) + ' MB/s';
+                  }
+                }
               }
             };
 
@@ -3485,21 +3746,49 @@ PAGE_UPLOAD = """<!DOCTYPE html>
 
     async function pollServerStatus() {
       try {
-        const res = await fetch(`${BASE}/status?batch=${BATCH}`);
-        if (res.ok) {
-          const data = await res.json();
+        const [stRes, syncRes] = await Promise.allSettled([
+          fetch(`${BASE}/status?batch=${BATCH}`),
+          fetch(`${BASE}/sync/status`)
+        ]);
+
+        if (stRes.status === 'fulfilled' && stRes.value.ok) {
+          const data = await stRes.value.json();
           if (data.usable !== undefined) {
             app.freeGB = Number((data.usable / (1024**3)).toFixed(1));
             const pill = document.getElementById('sam-pill-free');
             const freePill = document.getElementById('sam-free-pill');
             const hdr = document.getElementById('ios-header-status');
+            const mobPill = document.getElementById('mobile-pill-free');
             if (pill) pill.textContent = `${app.freeGB.toFixed(0)} GB Free`;
             if (freePill) freePill.textContent = `${app.freeGB.toFixed(1)} GB Free`;
             if (hdr) hdr.textContent = `Samsung S24 • ${app.freeGB.toFixed(0)} GB Free`;
+            if (mobPill) mobPill.textContent = `${app.freeGB.toFixed(0)}GB Free`;
           }
           if (data.sid && !window._pd_sid) {
             window._pd_sid = data.sid;
             try { sessionStorage.setItem('pd_sid', data.sid); } catch (_) {}
+          }
+        }
+
+        if (syncRes.status === 'fulfilled' && syncRes.value.ok) {
+          const syncData = await syncRes.value.json();
+          if (syncData.watermark) {
+            app.serverWatermark = syncData.watermark;
+            const wmPill = document.getElementById('ios-watermark-pill');
+            if (wmPill) wmPill.textContent = `Watermark: ${syncData.watermark.slice(5)}`;
+            const swm = document.getElementById('sam-stream-watermark');
+            if (swm) swm.textContent = syncData.watermark;
+            const sjw = document.getElementById('sam-json-watermark');
+            if (sjw) sjw.textContent = `"latest_captured_at": "${syncData.watermark}",`;
+          }
+          if (syncData.total_synced !== undefined) {
+            app.serverTotalSynced = syncData.total_synced;
+            const stot = document.getElementById('sam-stream-total');
+            if (stot) stot.textContent = `${syncData.total_synced.toLocaleString()} items`;
+            const spill = document.getElementById('sam-pill-count');
+            if (spill) spill.textContent = `${syncData.total_synced.toLocaleString()} In`;
+            const sjc = document.getElementById('sam-json-count');
+            if (sjc) sjc.textContent = `"backed_up_assets": ${syncData.total_synced},`;
           }
         }
       } catch (_) {}
@@ -3662,13 +3951,20 @@ PAGE_UPLOAD = """<!DOCTYPE html>
         bellDot.classList.remove('hidden');
         islandText.textContent = `${stats.unsyncedCount} UP`;
       } else if (stats.unsyncedCount === 0) {
-        connector.textContent = `0 Unsynced • All ${stats.totalSynced.toLocaleString()} Backed Up`;
-        heroTitle.textContent = 'All Caught Up!';
-        heroDesc.textContent = `Every photo & video up to ${stats.watermark.slice(11)} is safely stored on Samsung.`;
-        heroCtaText.textContent = 'Verified on Samsung';
+        if (app.items.length === 0) {
+          connector.textContent = `Ready to Sync • Direct to Samsung`;
+          heroTitle.textContent = 'Add Photos to Back Up';
+          heroDesc.textContent = 'Pick photos, videos, or ProRAW from your iPhone to stream directly to Samsung.';
+          heroCtaText.textContent = 'Select Photos & Videos';
+        } else {
+          connector.textContent = `0 Unsynced • All ${stats.totalSynced.toLocaleString()} Backed Up`;
+          heroTitle.textContent = 'All Caught Up!';
+          heroDesc.textContent = `Every photo & video up to ${stats.watermark.slice(11)} is safely stored on Samsung.`;
+          heroCtaText.textContent = '+ Add More Photos';
+        }
         heroSpeed.classList.add('hidden');
         bellDot.classList.add('hidden');
-        islandText.textContent = 'DONE';
+        islandText.textContent = 'READY';
       } else {
         connector.textContent = `${stats.unsyncedCount} Unsynced Items • ${stats.deltaMB} MB Delta`;
         heroTitle.textContent = `${stats.unsyncedCount} New Photos Waiting`;
@@ -3709,11 +4005,11 @@ PAGE_UPLOAD = """<!DOCTYPE html>
               <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5"/></svg>
             </div>
             <div class="text-xs font-extrabold text-zinc-900">Zero Unsynced Photos</div>
-            <p class="text-[11px] text-zinc-500 mt-0.5">Switch to "All Library" or capture a new photo above.</p>
+            <p class="text-[11px] text-zinc-500 mt-0.5">Switch to "All Library" or tap "+ Add" above.</p>
           </div>
         `;
       } else {
-        grid.innerHTML = list.slice(0, 8).map(item => {
+        grid.innerHTML = list.slice(0, 300).map(item => {
           const isSelected = item.selected && !item.synced;
           return `
             <div onclick="togglePhotoSelect('${item.id}')"
@@ -3721,9 +4017,13 @@ PAGE_UPLOAD = """<!DOCTYPE html>
               <div class="relative aspect-square rounded-[22px] overflow-hidden bg-zinc-200 shadow-xs border-2 transition-all ${
                 isSelected ? 'border-electric scale-[0.98]' : 'border-transparent'
               } ${item.synced ? 'opacity-65' : ''}">
-                <img src="${item.url}" alt="${item.title}" loading="lazy" class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+                ${item.url ? `
+                  <img src="${item.url}" alt="${item.title}" loading="lazy" class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+                ` : `
+                  <div class="w-full h-full bg-zinc-100 flex items-center justify-center font-bold text-xs text-zinc-500">${item.category.toUpperCase()}</div>
+                `}
                 
-                <!-- Top-Right Frosted Pill Badge (Matches "360" / "50" in Reference) -->
+                <!-- Top-Right Frosted Pill Badge -->
                 <div class="absolute top-2.5 right-2.5">
                   ${item.synced ? `
                     <span class="px-2.5 py-0.5 rounded-full bg-emerald-500/90 backdrop-blur-xs text-white text-[10px] font-bold shadow-xs">
@@ -3764,7 +4064,7 @@ PAGE_UPLOAD = """<!DOCTYPE html>
       }
     }
 
-    // --- Render iPhone Screen 3: File Upload Progress Queue (Matches Bottom-Center Reference) ---
+    // --- Render iPhone Screen 3: File Upload Progress Queue ---
     function renderIosQueueScreen(stats) {
       const container = document.getElementById('ios-upload-queue-list');
       const badge = document.getElementById('ios-queue-count-badge');
@@ -3774,8 +4074,8 @@ PAGE_UPLOAD = """<!DOCTYPE html>
       statusLabel.textContent = app.isSyncing ? 'In Progress' : (stats.unsyncedCount > 0 ? 'Pending Queue' : 'Completed');
 
       const displayItems = stats.unsynced.length > 0
-        ? stats.unsynced.slice(0, 6)
-        : stats.synced.slice(-5).reverse();
+        ? stats.unsynced
+        : stats.synced.slice().reverse();
 
       const pastelPalette = [
         { bg: 'bg-[#FFF1B8]', text: 'text-amber-800' },
@@ -3791,13 +4091,17 @@ PAGE_UPLOAD = """<!DOCTYPE html>
         return `
           <div class="bg-white rounded-2xl p-3 flex items-center justify-between gap-2 shadow-soft">
             <div class="flex items-center gap-3 min-w-0">
-              <div class="w-10 h-10 rounded-xl ${tone.bg} ${tone.text} flex items-center justify-center flex-shrink-0 font-mono text-[10px] font-extrabold">
-                ${item.category.toUpperCase()}
-              </div>
+              ${item.url ? `
+                <img src="${item.url}" class="w-10 h-10 rounded-xl object-cover flex-shrink-0" />
+              ` : `
+                <div class="w-10 h-10 rounded-xl ${tone.bg} ${tone.text} flex items-center justify-center flex-shrink-0 font-mono text-[10px] font-extrabold">
+                  ${item.category.toUpperCase()}
+                </div>
+              `}
               <div class="min-w-0">
                 <div class="text-xs font-extrabold text-zinc-900 truncate">${item.name}</div>
                 <div class="text-[10px] font-medium text-zinc-400 tabular-nums">
-                  ${item.synced ? 'Saved to Samsung S24' : `${item.sizeMB} MB • ${app.isSyncing ? '2 Secs Left' : 'Waiting'}`}
+                  ${item.synced ? 'Saved to Samsung S24' : `${item.sizeMB} MB • ${app.isSyncing ? 'Uploading' : 'Waiting'}`}
                 </div>
               </div>
             </div>
@@ -3825,14 +4129,40 @@ PAGE_UPLOAD = """<!DOCTYPE html>
       }).join('');
     }
 
-    function syncSingleItemNow(id) {
+    async function syncSingleItemNow(id) {
       const item = app.items.find(i => i.id === id);
       if (!item || item.synced) return;
-      item.synced = true;
-      item.progress = 100;
-      item.selected = false;
-      app.freeGB = Number((app.freeGB - item.sizeMB / 1024).toFixed(2));
-      app.photosGB = Number((app.photosGB + item.sizeMB / 1024).toFixed(2));
+      if (item.file) {
+        let sid = window._pd_sid || "";
+        if (!sid) {
+          try { sid = sessionStorage.getItem("pd_sid") || ""; } catch (_) {}
+        }
+        try {
+          await uploadRealItem(item, sid);
+          item.synced = true;
+          item.progress = 100;
+          item.selected = false;
+          item.err = false;
+          if (item.url && item.url.startsWith('blob:')) {
+            URL.revokeObjectURL(item.url);
+          }
+          const gbDelta = item.sizeMB / 1024;
+          app.freeGB = Number(Math.max(0, app.freeGB - gbDelta).toFixed(2));
+          if (item.category === 'video') app.videosGB = Number((app.videosGB + gbDelta).toFixed(2));
+          else if (item.category === 'raw') app.rawGB = Number((app.rawGB + gbDelta).toFixed(2));
+          else app.photosGB = Number((app.photosGB + gbDelta).toFixed(2));
+        } catch (err) {
+          item.err = true;
+          item.errMessage = err.message || 'Failed';
+          alert('Upload failed: ' + (err.message || 'Check connection'));
+        }
+      } else {
+        item.synced = true;
+        item.progress = 100;
+        item.selected = false;
+        const gbDelta = item.sizeMB / 1024;
+        app.freeGB = Number(Math.max(0, app.freeGB - gbDelta).toFixed(2));
+      }
       renderAll();
     }
 
