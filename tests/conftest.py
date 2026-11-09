@@ -24,7 +24,8 @@ def configure_env(tmp_path_factory):
     os.environ["PHOTO_DROP_HOME"] = str(home)
     os.environ["PHOTO_DROP_RESERVE_BYTES"] = "1024"
     os.environ["PHOTO_DROP_MAX_FILE_BYTES"] = str(2 * 1024**3)
-    os.environ["PHOTO_DROP_MAX_FILES"] = "500"
+    os.environ["PHOTO_DROP_MAX_FILES"] = "50000"
+    os.environ["PHOTO_DROP_ACQUIRE_TIMEOUT"] = "0.05"
     yield
 
 

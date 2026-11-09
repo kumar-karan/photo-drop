@@ -25,6 +25,7 @@ Design notes
 
 from __future__ import annotations
 
+import concurrent.futures
 import hmac
 import json
 import os
@@ -83,20 +84,22 @@ PORT = int(os.environ.get("PHOTO_DROP_PORT", "8080"))
 RESERVE_BYTES = int(os.environ.get("PHOTO_DROP_RESERVE_BYTES", str(2 * 1024**3)))  # 2 GiB
 
 MAX_FILE_BYTES = int(os.environ.get("PHOTO_DROP_MAX_FILE_BYTES", str(2 * 1024**3)))  # 2 GiB
-MAX_FILES_PER_SESSION = int(os.environ.get("PHOTO_DROP_MAX_FILES", "500"))
+MAX_FILES_PER_SESSION = int(os.environ.get("PHOTO_DROP_MAX_FILES", "50000"))
 
 # Concurrent uploads allowed at once. Flask's dev server spawns a thread per
 # request, so without this a client could open hundreds of simultaneous
 # multi-gigabyte writes and exhaust RAM, file descriptors or the disk write
-# queue. Uploads are refused with 503 rather than queued, so a phone never
-# silently builds a backlog it cannot drain.
+# queue. Uploads queue with a timeout before refusing with 503, preventing
+# transient rejection bursts.
 MAX_CONCURRENT_UPLOADS = int(os.environ.get("PHOTO_DROP_MAX_CONCURRENT", "3"))
+UPLOAD_ACQUIRE_TIMEOUT = float(os.environ.get("PHOTO_DROP_ACQUIRE_TIMEOUT", "5.0"))
 _UPLOAD_SLOTS = threading.BoundedSemaphore(max(1, MAX_CONCURRENT_UPLOADS))
+_SCAN_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="media-scan")
 
 # How long a session cookie stays valid.
 SESSION_TTL = int(os.environ.get("PHOTO_DROP_SESSION_TTL", str(12 * 3600)))
 
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.7.0"
 STARTED_AT = time.time()
 
 _ACTIVE_LOCK = threading.Lock()
@@ -1242,6 +1245,15 @@ def scan_media(paths: list[str]) -> str:
     return detail[-1].split(":")[0].removeprefix("scanned(") if detail else "unknown"
 
 
+def _scan_background(path: str, bid: str, name: str):
+    """Notify MediaProvider asynchronously so HTTP upload responses return immediately."""
+    try:
+        scanned = scan_media([path])
+        log(f"background scan: {name} -> {scanned}")
+    except Exception as exc:
+        log(f"background scan error ({name}): {exc}")
+
+
 _SCAN_SELFTEST = {"at": 0.0, "text": ""}
 
 
@@ -1413,11 +1425,14 @@ def drop_page(token: str):
     free = disk_free()
     if free - RESERVE_BYTES <= 0:
         return html_page(PAGE_FULL)
-    resp = make_response(PAGE_UPLOAD.format(
-        reserve=human(RESERVE_BYTES),
-        max_mb=MAX_FILE_BYTES // (1024 * 1024),
-        base=f"/d/{TOKEN}",
-    ))
+    body = (
+        PAGE_UPLOAD
+        .replace("{{BASE}}", f"/d/{TOKEN}")
+        .replace("{{RESERVE}}", human(RESERVE_BYTES))
+        .replace("{{MAX_MB}}", str(MAX_FILE_BYTES // (1024 * 1024)))
+        .replace("{{TOKEN}}", TOKEN)
+    )
+    resp = make_response(body)
     resp.headers["Content-Type"] = "text/html; charset=utf-8"
     resp.headers["Cache-Control"] = "no-store"
     if is_new:
@@ -1489,7 +1504,7 @@ def upload(token: str):
 
     # Everything above this line is cheap bookkeeping. Everything below writes
     # to disk and shells out, so that is what the concurrency bound protects.
-    if not _UPLOAD_SLOTS.acquire(blocking=False):
+    if not _UPLOAD_SLOTS.acquire(blocking=True, timeout=UPLOAD_ACQUIRE_TIMEOUT):
         log(f"upload refused, {MAX_CONCURRENT_UPLOADS} uploads already in flight")
         busy = jsonify(ok=False, error="phone is busy with other uploads, try again")
         busy.headers["Retry-After"] = "5"
@@ -1528,11 +1543,15 @@ def upload(token: str):
             log(f"upload rejected ({original}): {exc}")
             return jsonify(ok=False, error=str(exc)), 507
 
-        # Hand the file to MediaProvider so Google Photos sees it.
-        scanned = scan_media([str(target)])
-        record_upload(bid, name, original, written, scanned)
+        # Record upload and notify MediaProvider in background to avoid blocking
+        # upload slots or timing out over mobile tunnels.
+        record_upload(bid, name, original, written, "pending")
         saved = True
-        log(f"saved {original} -> {name} ({written}B, scan={scanned})")
+        log(f"saved {original} -> {name} ({written}B)")
+        try:
+            _SCAN_EXECUTOR.submit(_scan_background, str(target), bid, name)
+        except Exception as exc:
+            log(f"failed to dispatch scan for {name}: {exc}")
     finally:
         finish_transfer(transfer_id, saved)
         # Released even when the write fails, so one bad upload cannot wedge
@@ -1542,7 +1561,7 @@ def upload(token: str):
     resp = jsonify(
         ok=True,
         batch=bid,
-        scanned=scanned,
+        scanned="pending",
         free=disk_free(),
         files=[{"name": name, "size": written}],
         session=sid[:6],
@@ -2317,683 +2336,1585 @@ h1{font-size:20px}p{color:#8a8a92;max-width:36ch}</style>
 
 THUMBS = '<div class="grid">{items}</div>'
 
-PAGE_UPLOAD = """<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>Send Photos &amp; Videos — Photo Drop</title>
-<style>
-  :root {{
-    --bg: #090a0f;
-    --card: rgba(22, 24, 32, 0.85);
-    --card-border: rgba(255, 255, 255, 0.08);
-    --fg: #f3f4f6;
-    --fg-muted: #9ca3af;
-    --fg-subtle: #6b7280;
-    --accent: #22c55e;
-    --accent-glow: rgba(34, 197, 94, 0.25);
-    --accent-dark: #15803d;
-    --danger: #ef4444;
-    --danger-bg: rgba(239, 68, 68, 0.12);
-    --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  }}
-  * {{ box-sizing: border-box; -webkit-tap-highlight-color: transparent; margin: 0; padding: 0; }}
-  body {{
-    background: var(--bg);
-    color: var(--fg);
-    font-family: var(--font);
-    min-height: 100vh;
-    padding: calc(env(safe-area-inset-top, 20px) + 16px) 16px calc(env(safe-area-inset-bottom, 20px) + 100px);
-    overflow-x: hidden;
-  }}
-  .app-wrap {{
-    max-width: 520px;
-    margin: 0 auto;
-  }}
-  header {{
-    margin-bottom: 20px;
-  }}
-  .brand {{
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 6px;
-  }}
-  .brand-icon {{
-    width: 28px;
-    height: 28px;
-    background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
-    border-radius: 8px;
-    display: grid;
-    place-items: center;
-    box-shadow: 0 4px 12px var(--accent-glow);
-  }}
-  .brand-title {{
-    font-size: 21px;
-    font-weight: 700;
-    letter-spacing: -0.02em;
-    color: var(--fg);
-  }}
-  .sub {{
-    color: var(--fg-muted);
-    font-size: 13.5px;
-    line-height: 1.45;
-  }}
-  .space-card {{
-    background: var(--card);
-    border: 1px solid var(--card-border);
-    backdrop-filter: blur(16px);
-    border-radius: 14px;
-    padding: 12px 16px;
-    margin-bottom: 18px;
-  }}
-  .space-header {{
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    font-size: 13px;
-    color: var(--fg-muted);
-    margin-bottom: 8px;
-  }}
-  .space-header b {{
-    color: var(--fg);
-    font-weight: 600;
-  }}
-  .track {{
-    height: 6px;
-    background: rgba(255, 255, 255, 0.08);
-    border-radius: 99px;
-    overflow: hidden;
-  }}
-  .fill {{
-    height: 100%;
-    background: var(--accent);
-    border-radius: 99px;
-    transition: width 0.3s ease;
-  }}
-  .space-hint {{
-    font-size: 11px;
-    color: var(--fg-subtle);
-    margin-top: 6px;
-  }}
-  .live-strip {{
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin: -8px 2px 18px;
-    color: var(--fg-muted);
-    font-size: 11.5px;
-  }}
-  .live-dot {{
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--accent);
-    box-shadow: 0 0 0 4px var(--accent-glow);
-    animation: livePulse 2s ease-in-out infinite;
-  }}
-  @keyframes livePulse {{
-    0%, 100% {{ opacity: 1; }}
-    50% {{ opacity: .35; }}
-  }}
-  .live-label b {{
-    color: var(--fg);
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-weight: 600;
-  }}
-  .live-sep {{ color: var(--fg-subtle); }}
-  .dropzone {{
-    border: 2px dashed rgba(255, 255, 255, 0.16);
-    background: rgba(255, 255, 255, 0.02);
-    border-radius: 20px;
-    padding: 36px 20px;
-    text-align: center;
-    cursor: pointer;
-    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-  }}
-  .dropzone:active, .dropzone.dragover {{
-    background: rgba(34, 197, 94, 0.06);
-    border-color: var(--accent);
-    transform: scale(0.99);
-  }}
-  .drop-icon {{
-    width: 48px;
-    height: 48px;
-    border-radius: 50%;
-    background: rgba(255, 255, 255, 0.06);
-    display: grid;
-    place-items: center;
-    margin: 0 auto 12px;
-    color: var(--accent);
-  }}
-  .drop-title {{
-    font-size: 16px;
-    font-weight: 600;
-    margin-bottom: 4px;
-    color: var(--fg);
-  }}
-  .drop-desc {{
-    font-size: 13px;
-    color: var(--fg-muted);
-  }}
-  .items-list {{
-    margin-top: 20px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }}
-  .file-item {{
-    background: var(--card);
-    border: 1px solid var(--card-border);
-    backdrop-filter: blur(12px);
-    border-radius: 14px;
-    padding: 10px 14px;
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    position: relative;
-    overflow: hidden;
-  }}
-  .file-thumb {{
-    width: 44px;
-    height: 44px;
-    border-radius: 8px;
-    object-fit: cover;
-    background: rgba(255, 255, 255, 0.05);
-    flex-shrink: 0;
-    display: grid;
-    place-items: center;
-    overflow: hidden;
-  }}
-  .file-thumb img {{
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-  }}
-  .file-info {{
-    flex: 1;
-    min-width: 0;
-  }}
-  .file-name {{
-    font-size: 13.5px;
-    font-weight: 500;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    color: var(--fg);
-  }}
-  .file-meta {{
-    font-size: 12px;
-    color: var(--fg-muted);
-    margin-top: 2px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }}
-  .file-progress {{
-    position: absolute;
-    bottom: 0;
-    left: 0;
-    height: 3px;
-    background: var(--accent);
-    width: 0%;
-    transition: width 0.15s linear;
-  }}
-  .file-status {{
-    font-size: 12px;
-    font-weight: 600;
-    font-variant-numeric: tabular-nums;
-    margin-left: auto;
-    color: var(--fg-muted);
-    flex-shrink: 0;
-  }}
-  .file-status.done {{
-    color: var(--accent);
-  }}
-  .file-status.err {{
-    color: var(--danger);
-  }}
-  .btn-remove {{
-    background: none;
-    border: none;
-    color: var(--fg-subtle);
-    padding: 6px;
-    cursor: pointer;
-    font-size: 16px;
-    display: grid;
-    place-items: center;
-    border-radius: 6px;
-    line-height: 1;
-  }}
-  .btn-remove:active {{
-    background: rgba(255, 255, 255, 0.1);
-    color: var(--fg);
-  }}
-  .btn-retry {{
-    background: var(--danger-bg);
-    border: 1px solid rgba(239, 68, 68, 0.3);
-    color: var(--danger);
-    font-size: 11px;
-    padding: 3px 8px;
-    border-radius: 6px;
-    cursor: pointer;
-    font-weight: 600;
-  }}
-  .bottom-bar {{
-    position: fixed;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    background: rgba(9, 10, 15, 0.92);
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
-    border-top: 1px solid var(--card-border);
-    padding: 12px 16px calc(env(safe-area-inset-bottom, 16px) + 12px);
-    z-index: 100;
-  }}
-  .bottom-wrap {{
-    max-width: 520px;
-    margin: 0 auto;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }}
-  .overall-track {{
-    height: 4px;
-    background: rgba(255, 255, 255, 0.1);
-    border-radius: 99px;
-    overflow: hidden;
-    display: none;
-  }}
-  .overall-fill {{
-    height: 100%;
-    background: linear-gradient(90deg, #22c55e, #4ade80);
-    width: 0%;
-    transition: width 0.12s linear;
-  }}
-  .btn-send {{
-    width: 100%;
-    height: 52px;
-    background: var(--fg);
-    color: #090a0f;
-    border: none;
-    border-radius: 14px;
-    font-family: var(--font);
-    font-size: 16px;
-    font-weight: 600;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    cursor: pointer;
-    box-shadow: 0 4px 16px rgba(255, 255, 255, 0.15);
-    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-  }}
-  .btn-send:disabled {{
-    opacity: 0.35;
-    cursor: not-allowed;
-    box-shadow: none;
-  }}
-  .btn-send:not(:disabled):active {{
-    transform: scale(0.98);
-  }}
-  .status-hint {{
-    text-align: center;
-    font-size: 12px;
-    color: var(--fg-muted);
-    min-height: 16px;
-  }}
-</style>
+PAGE_UPLOAD = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#F5F6F7">
+
+  <title>PhotoDrop Sync — iPhone PWA & Samsung APK Studio</title>
+  <!-- Google Fonts: Plus Jakarta Sans & JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['"Plus Jakarta Sans"', '-apple-system', 'BlinkMacSystemFont', 'sans-serif'],
+            mono: ['"JetBrains Mono"', 'monospace'],
+          },
+          colors: {
+            board: '#D8DAD9',
+            appbg: '#F5F6F7',
+            electric: '#1E50FF',
+            lavender: {
+              card: '#DECFFF',
+              deep: '#CBB5FF'
+            },
+            butter: {
+              card: '#FFF1B8',
+              deep: '#FBE38E'
+            },
+            mint: {
+              card: '#DFF2E6',
+              deep: '#C5E8D2'
+            },
+            pillnav: '#141519'
+          },
+          boxShadow: {
+            'phone': '0 26px 60px -12px rgba(20, 21, 25, 0.22), 0 0 0 10px #FFFFFF',
+            'soft': '0 4px 20px -2px rgba(20, 21, 25, 0.05)',
+            'pill': '0 10px 25px -4px rgba(20, 21, 25, 0.28)',
+            'float': '0 4px 12px rgba(20, 21, 25, 0.08)'
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    .tabular-nums {
+      font-variant-numeric: tabular-nums;
+    }
+    /* Hide scrollbars inside phone frames for clean presentation */
+    .no-scrollbar::-webkit-scrollbar {
+      display: none;
+    }
+    .no-scrollbar {
+      -ms-overflow-style: none;
+      scrollbar-width: none;
+    }
+    @keyframes floatPulse {
+      0%, 100% { transform: translateY(0px); }
+      50% { transform: translateY(-2px); }
+    }
+    .animate-float {
+      animation: floatPulse 3s ease-in-out infinite;
+    }
+  </style>
 </head>
-<body>
-<div class="app-wrap">
-  <header>
-    <div class="brand">
-      <div class="brand-icon">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 16V4m0 0L8 8m4-4 4 4"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>
-        </svg>
+<body class="bg-board text-zinc-900 font-sans antialiased min-h-screen flex flex-col selection:bg-electric selection:text-white">
+  <input type="file" id="real-file-picker" multiple accept="image/*,video/*" style="display:none;" />
+
+  <!-- ========================================================================= -->
+  <!-- QUIET STUDIO PRESENTATION BAR                                             -->
+  <!-- ========================================================================= -->
+  <header class="w-full max-w-6xl mx-auto px-4 pt-5 pb-2 flex flex-wrap items-center justify-between gap-3">
+    <div class="flex items-center gap-3">
+      <div class="w-9 h-9 rounded-full bg-electric text-white flex items-center justify-center font-extrabold text-sm shadow-sm">
+        PD
       </div>
-      <h1 class="brand-title">Send Photos &amp; Videos</h1>
+      <div>
+        <div class="flex items-center gap-2">
+          <h1 class="text-sm font-extrabold tracking-tight text-zinc-900">PhotoDrop Dual-Device Sync</h1>
+          <span class="text-[11px] font-semibold px-2.5 py-0.5 rounded-full bg-white/80 text-zinc-700">1-Tap Watermark Engine</span>
+        </div>
+        <p class="text-xs text-zinc-600">Interactive Live Link: Tap <strong>Sync All Now</strong> on iPhone to watch the Samsung APK receive files in real time</p>
+      </div>
     </div>
-    <p class="sub">Transferred directly to Samsung Galaxy in original quality. Ready for Google Photos backup.</p>
+
+    <!-- View Switcher & Quick Simulation Controls -->
+    <div class="flex items-center flex-wrap gap-2">
+      <div class="bg-white/75 backdrop-blur-sm p-1 rounded-full flex items-center gap-1 shadow-xs">
+        <button type="button" onclick="setViewportMode('both')" id="view-btn-both"
+          class="px-3.5 py-1.5 rounded-full text-xs font-bold bg-pillnav text-white transition-all">
+          Side-by-Side
+        </button>
+        <button type="button" onclick="setViewportMode('iphone')" id="view-btn-iphone"
+          class="px-3.5 py-1.5 rounded-full text-xs font-semibold text-zinc-600 hover:text-zinc-900 transition-all">
+          iPhone PWA
+        </button>
+        <button type="button" onclick="setViewportMode('samsung')" id="view-btn-samsung"
+          class="px-3.5 py-1.5 rounded-full text-xs font-semibold text-zinc-600 hover:text-zinc-900 transition-all">
+          Samsung APK
+        </button>
+      </div>
+
+      <button type="button" onclick="pickRealPhotos()"
+        class="px-3.5 py-2 rounded-full bg-white hover:bg-zinc-50 active:scale-95 text-xs font-bold text-zinc-800 shadow-xs flex items-center gap-1.5 transition-all"
+        title="Simulate taking a new photo on iPhone 17 Pro">
+        <span class="w-2 h-2 rounded-full bg-electric"></span>
+        <span>+ Capture Photo on iPhone</span>
+      </button>
+
+      <button type="button" onclick="resetDemoState()"
+        class="px-3 py-2 rounded-full bg-white/60 hover:bg-white text-xs font-semibold text-zinc-600 transition-all">
+        Reset (14)
+      </button>
+    </div>
   </header>
 
-  <div class="space-card">
-    <div class="space-header">
-      <span>Phone Storage</span>
-      <b><span id="free">Checking...</span> free</b>
-    </div>
-    <div class="track"><div class="fill" id="spacebar" style="width: 100%;"></div></div>
-    <p class="space-hint">Uploads pause at {reserve} free to protect phone storage. Up to {max_mb} MB per file.</p>
-  </div>
+  <!-- ========================================================================= -->
+  <!-- DUAL PHONE PRESENTATION STAGE                                             -->
+  <!-- ========================================================================= -->
+  <main class="flex-1 w-full max-w-6xl mx-auto px-4 py-5 flex flex-col lg:flex-row items-center lg:items-start justify-center gap-8 lg:gap-12">
 
-  <div class="live-strip">
-    <span class="live-dot"></span>
-    <span class="live-label">Live session <b id="sessionId">—</b></span>
-    <span class="live-sep">·</span>
-    <span id="sessionFiles">0 files received</span>
-  </div>
-
-  <div class="dropzone" id="drop">
-    <div class="drop-icon">
-      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <rect width="18" height="18" x="3" y="3" rx="2" ry="2"/>
-        <circle cx="9" cy="9" r="2"/>
-        <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/>
-      </svg>
-    </div>
-    <div class="drop-title">Tap to Choose Photos &amp; Videos</div>
-    <div class="drop-desc">Select as many as you like · HEIC, JPEG, MP4, MOV</div>
-    <input type="file" id="pick" multiple accept="image/*,video/*" hidden>
-  </div>
-
-  <div class="items-list" id="items"></div>
-</div>
-
-<div class="bottom-bar">
-  <div class="bottom-wrap">
-    <div class="overall-track" id="overall-track">
-      <div class="overall-fill" id="overall-fill"></div>
-    </div>
-    <button class="btn-send" id="go" disabled>
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
-      </svg>
-      <span id="go-text">Choose Photos to Send</span>
-    </button>
-    <div class="status-hint" id="status"></div>
-  </div>
-</div>
-
-<script>
-const BATCH = Math.random().toString(16).slice(2, 14);
-const BASE = "{base}";
-let queue = [];
-let usableSpace = 0;
-let isUploading = false;
-let wakeLock = null;
-
-async function requestWakeLock() {{
-  if ("wakeLock" in navigator) {{
-    try {{
-      wakeLock = await navigator.wakeLock.request("screen");
-    }} catch (e) {{}}
-  }}
-}}
-
-function releaseWakeLock() {{
-  if (wakeLock) {{
-    try {{ wakeLock.release(); }} catch (e) {{}}
-    wakeLock = null;
-  }}
-}}
-
-async function poll() {{
-  try {{
-    const r = await fetch(BASE + "/status?batch=" + BATCH, {{ credentials: "include" }});
-    const d = await r.json();
-    if (d.sid) {{
-      try {{ sessionStorage.setItem("pd_sid", d.sid); }} catch (e) {{}}
-      window._pd_sid = d.sid;
-    }}
-    usableSpace = d.usable;
-    document.getElementById("free").textContent = d.free_human;
-    const pct = d.reserve ? (d.usable / (d.usable + d.reserve)) * 100 : 100;
-    document.getElementById("spacebar").style.width = Math.max(2, Math.min(100, pct)) + "%";
-    document.getElementById("sessionId").textContent = d.session || "—";
-    document.getElementById("sessionFiles").textContent =
-      (d.session_files || 0) + ((d.session_files || 0) === 1 ? " file received" : " files received");
-  }} catch (e) {{}}
-}}
-poll();
-setInterval(poll, 3000);
-
-window.addEventListener("beforeunload", e => {{
-  if (!isUploading) return;
-  e.preventDefault();
-  e.returnValue = "";
-}});
-
-const drop = document.getElementById("drop");
-const pick = document.getElementById("pick");
-drop.onclick = () => {{ if (!isUploading) pick.click(); }};
-pick.onchange = () => {{ addFiles([...pick.files]); pick.value = ""; }};
-
-drop.ondragover = e => {{ e.preventDefault(); drop.classList.add("dragover"); }};
-drop.ondragleave = () => {{ drop.classList.remove("dragover"); }};
-drop.ondrop = e => {{
-  e.preventDefault();
-  drop.classList.remove("dragover");
-  if (!isUploading && e.dataTransfer.files) {{
-    addFiles([...e.dataTransfer.files]);
-  }}
-}};
-
-function humanSize(bytes) {{
-  if (bytes < 1024) return bytes + " B";
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
-  return (bytes / (1024 * 1024)).toFixed(1) + " MB";
-}}
-
-function addFiles(files) {{
-  for (const f of files) {{
-    const url = f.type.startsWith("image/") ? URL.createObjectURL(f) : "";
-    queue.push({{
-      file: f,
-      previewUrl: url,
-      loaded: 0,
-      total: f.size,
-      done: false,
-      err: false,
-      errMessage: ""
-    }});
-  }}
-  renderQueue();
-}}
-
-function removeFile(index) {{
-  if (isUploading) return;
-  if (queue[index] && queue[index].previewUrl) {{
-    URL.revokeObjectURL(queue[index].previewUrl);
-  }}
-  queue.splice(index, 1);
-  renderQueue();
-}}
-
-function renderQueue() {{
-  const container = document.getElementById("items");
-  container.innerHTML = "";
-
-  queue.forEach((it, idx) => {{
-    const item = document.createElement("div");
-    item.className = "file-item";
-
-    let thumbHtml = "";
-    if (it.previewUrl) {{
-      thumbHtml = `<div class="file-thumb"><img src="${{it.previewUrl}}" alt="" loading="lazy"></div>`;
-    }} else {{
-      thumbHtml = `<div class="file-thumb">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
-        </svg>
-      </div>`;
-    }}
-
-    let statusText = "";
-    let statusClass = "file-status";
-    if (it.done) {{
-      statusText = "✓ Safe";
-      statusClass += " done";
-    }} else if (it.err) {{
-      statusText = `<button class="btn-retry" onclick="retryFile(${{idx}})">Retry</button>`;
-      statusClass += " err";
-    }} else if (isUploading && it.loaded > 0) {{
-      statusText = Math.round((it.loaded / it.total) * 100) + "%";
-    }} else {{
-      statusText = !isUploading ? `<button class="btn-remove" onclick="removeFile(${{idx}})">✕</button>` : "Ready";
-    }}
-
-    item.innerHTML = `
-      ${{thumbHtml}}
-      <div class="file-info">
-        <div class="file-name">${{escapeHtml(it.file.name)}}</div>
-        <div class="file-meta">
-          <span>${{humanSize(it.file.size)}}</span>
-          ${{it.err ? `<span style="color:var(--danger);">${{it.errMessage || "Upload failed"}}</span>` : ""}}
-        </div>
+    <!-- ======================================================================= -->
+    <!-- DEVICE 1: APPLE IPHONE 17 PRO (PWA SENDER CLIENT)                       -->
+    <!-- ======================================================================= -->
+    <section id="frame-iphone" aria-label="iPhone 17 Pro PWA Client" class="w-full max-w-[380px] flex flex-col items-center">
+      <!-- Subtle Device Label Above Phone -->
+      <div class="mb-3 flex items-center gap-2">
+        <span class="px-3 py-1 rounded-full bg-white/80 text-[11px] font-bold tracking-wide uppercase text-zinc-700 shadow-xs">
+          iOS Safari PWA &bull; Sender
+        </span>
+        <span class="text-xs font-medium text-zinc-600">iPhone 17 Pro</span>
       </div>
-      <div class="${{statusClass}}">${{statusText}}</div>
-      <div class="file-progress" style="width:${{it.done ? 100 : (it.loaded / it.total * 100)}}%;"></div>
-    `;
-    container.appendChild(item);
-  }});
 
-  const pending = queue.filter(i => !i.done);
-  const doneCount = queue.filter(i => i.done).length;
-  const goBtn = document.getElementById("go");
-  const goText = document.getElementById("go-text");
+      <!-- Phone Hardware Shell -->
+      <div class="w-full h-[790px] bg-appbg rounded-[46px] shadow-phone relative overflow-hidden flex flex-col justify-between select-none">
+        
+        <!-- Top iOS Status Bar + Dynamic Island -->
+        <div class="px-7 pt-3.5 pb-2 flex items-center justify-between text-xs font-bold text-zinc-900 z-20">
+          <span class="tabular-nums">11:30</span>
+          <!-- Dynamic Island -->
+          <div class="w-24 h-6 bg-pillnav rounded-full flex items-center justify-between px-2.5">
+            <span id="ios-island-indicator" class="w-2 h-2 rounded-full bg-emerald-400"></span>
+            <span id="ios-island-text" class="text-[9px] font-mono text-white/80 tabular-nums">SYNC</span>
+          </div>
+          <!-- Signal / Wifi / Battery -->
+          <div class="flex items-center gap-1.5">
+            <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 16 16"><rect x="1" y="10" width="2" height="4" rx="0.5"/><rect x="4.5" y="7.5" width="2" height="6.5" rx="0.5"/><rect x="8" y="5" width="2" height="9" rx="0.5"/><rect x="11.5" y="2" width="2" height="12" rx="0.5"/></svg>
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8.288 15.038a5.25 5.25 0 017.424 0M5.106 11.856c3.807-3.808 9.98-3.808 13.788 0M1.924 8.674c5.565-5.565 14.587-5.565 20.152 0"/></svg>
+            <div class="w-5 h-2.5 rounded-[3px] border border-zinc-900 p-0.5 flex items-center"><div class="w-full h-full bg-zinc-900 rounded-[1px]"></div></div>
+          </div>
+        </div>
 
-  if (isUploading) {{
-    goBtn.disabled = true;
-    goText.textContent = `Uploading ${{doneCount + 1}} of ${{queue.length}}...`;
-    document.getElementById("overall-track").style.display = "block";
-  }} else if (pending.length > 0) {{
-    goBtn.disabled = false;
-    const totalBytes = pending.reduce((sum, i) => sum + i.file.size, 0);
-    goText.textContent = `Send ${{pending.length}} ${{pending.length === 1 ? "File" : "Files"}} (${{humanSize(totalBytes)}})`;
-    document.getElementById("overall-track").style.display = "none";
-  }} else if (queue.length > 0 && doneCount === queue.length) {{
-    goBtn.disabled = true;
-    goText.textContent = "All Files Transferred!";
-    document.getElementById("overall-track").style.display = "none";
-  }} else {{
-    goBtn.disabled = true;
-    goText.textContent = "Choose Photos to Send";
-    document.getElementById("overall-track").style.display = "none";
-  }}
-}}
+        <!-- SCROLLABLE VIEWPORT CONTAINER FOR IPHONE SCREENS -->
+        <div class="flex-1 overflow-y-auto no-scrollbar px-5 pt-1 pb-24 relative">
 
-function escapeHtml(text) {{
-  const div = document.createElement("div");
-  div.textContent = text;
-  return div.innerHTML;
-}}
+          <!-- ================================================================= -->
+          <!-- IPHONE SCREEN 1: HOME (1-Tap Catch-Up & Lavender Delta Card)      -->
+          <!-- ================================================================= -->
+          <div id="ios-screen-home" class="space-y-4">
+            
+            <!-- Top Profile & Bell Row -->
+            <div class="flex items-center justify-between pt-1">
+              <div class="flex items-center gap-3">
+                <div class="w-11 h-11 rounded-full bg-[#D8F3DC] border-2 border-white shadow-xs overflow-hidden flex items-center justify-center">
+                  <img src="https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=120&q=80" alt="Profile" class="w-full h-full object-cover" />
+                </div>
+                <div>
+                  <div class="text-xs font-bold text-zinc-900">Hi, iPhone 17 Pro</div>
+                  <div id="ios-header-status" class="text-[11px] font-medium text-zinc-500 tabular-nums">Samsung S24 &bull; 75% Free</div>
+                </div>
+              </div>
+              <button type="button" onclick="switchIosTab('queue')"
+                aria-label="Open Upload Queue"
+                class="w-10 h-10 rounded-full bg-white border border-zinc-200/80 flex items-center justify-center text-zinc-700 hover:bg-zinc-100 transition-colors relative">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0" />
+                </svg>
+                <span id="ios-bell-dot" class="w-2 h-2 rounded-full bg-electric absolute top-2 right-2.5"></span>
+              </button>
+            </div>
 
-function updateOverallProgress() {{
-  if (!queue.length) return;
-  const total = queue.reduce((sum, i) => sum + i.total, 0);
-  const loaded = queue.reduce((sum, i) => sum + (i.done ? i.total : i.loaded), 0);
-  const pct = Math.min(100, Math.round((loaded / total) * 100));
-  document.getElementById("overall-fill").style.width = pct + "%";
-}}
+            <!-- Editorial Bold Title -->
+            <h2 class="text-[26px] font-extrabold tracking-tight text-zinc-900 leading-tight">
+              Sync With Samsung
+            </h2>
 
-async function uploadSingle(it) {{
-  let sid = window._pd_sid || "";
-  if (!sid) {{
-    try {{ sid = sessionStorage.getItem("pd_sid") || ""; }} catch (e) {{}}
-  }}
-  let url = BASE + "/upload?batch=" + BATCH + "&name=" + encodeURIComponent(it.file.name);
-  if (sid) {{
-    url += "&sid=" + encodeURIComponent(sid);
-  }}
-  const xhr = new XMLHttpRequest();
-  xhr.withCredentials = true;
-  const p = xhr.upload;
+            <!-- Search / Watermark Pill Bar -->
+            <div class="bg-white rounded-full px-4 py-3 flex items-center justify-between shadow-soft">
+              <div class="flex items-center gap-2.5 min-w-0">
+                <span id="ios-tunnel-dot" class="w-2.5 h-2.5 rounded-full bg-emerald-500 flex-shrink-0"></span>
+                <span id="ios-watermark-pill" class="text-xs font-medium text-zinc-500 truncate tabular-nums">
+                  Watermark: Nov 8, 14:32:10
+                </span>
+              </div>
+              <button type="button" onclick="switchIosTab('photos')" class="text-zinc-700 hover:text-electric transition-colors" title="Filter Unsynced Photos">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 6h9.75M10.5 6a1.5 1.5 0 11-3 0m3 0a1.5 1.5 0 10-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-9.75 0h9.75" />
+                </svg>
+              </button>
+            </div>
 
-  p.onprogress = e => {{
-    if (!e.lengthComputable) return;
-    it.loaded = e.loaded;
-    updateOverallProgress();
-    renderQueue();
-  }};
+            <!-- LAVENDER FEATURE CARD + FLOATING CONNECTOR PILL (Matches Top-Left Reference) -->
+            <div class="relative pb-3">
+              <div class="bg-lavender-card rounded-[26px] p-4 shadow-soft">
+                <div class="flex items-center justify-between mb-3.5">
+                  <span class="text-xs font-extrabold text-zinc-900">Unbacked Delta &amp; Library</span>
+                  <button type="button" onclick="switchIosTab('photos')" class="text-zinc-700 hover:text-zinc-900">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+                    </svg>
+                  </button>
+                </div>
 
-  await new Promise((resolve, reject) => {{
-    p.onerror = () => reject(new Error("Connection dropped. Check Wi-Fi."));
-    xhr.onload = () => {{
-      if (xhr.status >= 200 && xhr.status < 300) {{
-        try {{
-          const res = JSON.parse(xhr.responseText || "{{}}");
-          if (res.sid) {{
-            window._pd_sid = res.sid;
-            try {{ sessionStorage.setItem("pd_sid", res.sid); }} catch (e) {{}}
-          }}
-        }} catch (_) {{}}
-        resolve();
-      }} else {{
-        let msg = "Upload failed (" + xhr.status + ")";
-        try {{
-          const res = JSON.parse(xhr.responseText || "{{}}");
-          if (res.error) msg = res.error;
-        }} catch (_) {{}}
-        reject(new Error(msg));
-      }}
-    }};
-    xhr.open("POST", url);
-    if (sid) {{
-      try {{ xhr.setRequestHeader("X-PD-Session", sid); }} catch (_) {{}}
-    }}
-    xhr.send(it.file);
-  }});
+                <!-- 4 White Circular Icon Bubbles -->
+                <div class="grid grid-cols-4 gap-2 text-center">
+                  <!-- Bubble 1: Photos -->
+                  <button type="button" onclick="switchIosTab('photos')" class="flex flex-col items-center group">
+                    <div class="w-12 h-12 rounded-full bg-white flex items-center justify-center shadow-xs group-hover:scale-105 transition-transform">
+                      <span class="w-6 h-6 rounded-md bg-orange-100 text-orange-500 flex items-center justify-center">
+                        <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm12 12H4l4-8 3 6 2-4 3 6z" clip-rule="evenodd"/></svg>
+                      </span>
+                    </div>
+                    <span class="mt-2 text-[11px] font-bold text-zinc-900">Photos</span>
+                    <span id="bubble-photos-sub" class="text-[10px] font-medium text-zinc-600 tabular-nums">10 New</span>
+                  </button>
 
-  it.done = true;
-  it.err = false;
-  it.loaded = it.total;
-}}
+                  <!-- Bubble 2: Videos -->
+                  <button type="button" onclick="switchIosTab('photos')" class="flex flex-col items-center group">
+                    <div class="w-12 h-12 rounded-full bg-white flex items-center justify-center shadow-xs group-hover:scale-105 transition-transform">
+                      <span class="w-6 h-6 rounded-md bg-blue-100 text-electric flex items-center justify-center">
+                        <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20"><path d="M2 6a2 2 0 012-2h6a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V6zM14.553 7.106A1 1 0 0014 8v4a1 1 0 00.553.894l2 1A1 1 0 0018 13V7a1 1 0 00-1.447-.894l-2 1z"/></svg>
+                      </span>
+                    </div>
+                    <span class="mt-2 text-[11px] font-bold text-zinc-900">Videos</span>
+                    <span id="bubble-videos-sub" class="text-[10px] font-medium text-zinc-600 tabular-nums">2 New</span>
+                  </button>
 
-async function startUpload() {{
-  if (isUploading) return;
-  const pending = queue.filter(i => !i.done);
-  if (!pending.length) return;
+                  <!-- Bubble 3: ProRAW -->
+                  <button type="button" onclick="switchIosTab('photos')" class="flex flex-col items-center group">
+                    <div class="w-12 h-12 rounded-full bg-white flex items-center justify-center shadow-xs group-hover:scale-105 transition-transform">
+                      <span class="w-6 h-6 rounded-md bg-rose-100 text-rose-500 flex items-center justify-center font-mono text-[9px] font-extrabold">
+                        RAW
+                      </span>
+                    </div>
+                    <span class="mt-2 text-[11px] font-bold text-zinc-900">ProRAW</span>
+                    <span id="bubble-raw-sub" class="text-[10px] font-medium text-zinc-600 tabular-nums">2 New</span>
+                  </button>
 
-  isUploading = true;
-  await requestWakeLock();
-  document.getElementById("status").textContent = "Uploading... Keep this tab active.";
-  renderQueue();
+                  <!-- Bubble 4: Already Synced -->
+                  <button type="button" onclick="openSyncedFilter()" class="flex flex-col items-center group">
+                    <div class="w-12 h-12 rounded-full bg-white flex items-center justify-center shadow-xs group-hover:scale-105 transition-transform">
+                      <span class="w-6 h-6 rounded-md bg-purple-100 text-purple-600 flex items-center justify-center">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5"/></svg>
+                      </span>
+                    </div>
+                    <span class="mt-2 text-[11px] font-bold text-zinc-900">Synced</span>
+                    <span id="bubble-synced-sub" class="text-[10px] font-medium text-zinc-600 tabular-nums">4,806</span>
+                  </button>
+                </div>
+              </div>
 
-  for (const it of pending) {{
-    if (usableSpace <= 0) {{
-      document.getElementById("status").textContent = "Phone storage is full. Paused.";
-      isUploading = false;
-      releaseWakeLock();
-      renderQueue();
-      return;
-    }}
-    try {{
-      await uploadSingle(it);
-    }} catch (err) {{
-      it.err = true;
-      it.errMessage = err.message || "Failed";
-    }}
-    poll();
-    renderQueue();
-  }}
+              <!-- Signature Floating Connector Pill ("420 Files • 5 Folder" in Reference) -->
+              <div class="absolute -bottom-1.5 inset-x-0 flex justify-center">
+                <div id="ios-connector-pill" class="px-4 py-1 rounded-full bg-white shadow-float border border-zinc-100 text-[10px] font-bold text-zinc-700 tabular-nums">
+                  14 Unsynced Items &bull; 68.4 MB Delta
+                </div>
+              </div>
+            </div>
 
-  isUploading = false;
-  releaseWakeLock();
+            <!-- WARM BUTTER YELLOW HERO CARD (Matches "Viewed Links / See All ->" Card) -->
+            <div class="bg-butter-card rounded-[26px] p-4 shadow-soft relative overflow-hidden">
+              <!-- Decorative soft cloud shapes in top right -->
+              <div class="w-20 h-20 rounded-full bg-white/50 absolute -top-6 -right-6 pointer-events-none"></div>
+              <div class="w-12 h-12 rounded-full bg-white/60 absolute top-6 right-8 pointer-events-none"></div>
 
-  const successCount = queue.filter(i => i.done).length;
-  if (successCount > 0 && queue.every(i => i.done)) {{
-    location.href = BASE + "/done/" + BATCH;
-  }} else if (successCount > 0) {{
-    document.getElementById("status").textContent = `${{successCount}} uploaded, some failed. Tap Retry to continue.`;
-  }}
-}}
+              <div class="relative z-10">
+                <div class="flex items-center justify-between">
+                  <span id="ios-hero-tag" class="text-[10px] font-extrabold uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-white/80 text-zinc-800">
+                    Mode A &bull; Auto Catch-Up
+                  </span>
+                  <span id="ios-hero-speed" class="text-[11px] font-mono font-bold text-zinc-700 tabular-nums hidden">
+                    42.8 MB/s
+                  </span>
+                </div>
 
-function retryFile(idx) {{
-  if (queue[idx]) {{
-    queue[idx].err = false;
-    queue[idx].errMessage = "";
-    queue[idx].loaded = 0;
-    renderQueue();
-    startUpload();
-  }}
-}}
+                <h3 id="ios-hero-title" class="mt-2.5 text-lg font-extrabold text-zinc-900 leading-snug">
+                  14 New Photos Waiting
+                </h3>
+                <p id="ios-hero-desc" class="mt-1 text-xs font-medium text-zinc-600 leading-relaxed max-w-[235px]">
+                  Captured after your last Samsung backup on Nov 8 at 2:32 PM.
+                </p>
 
-document.getElementById("go").onclick = startUpload;
-</script>
-</body></html>"""
+                <!-- Signature White Pill CTA Button with Black Circle Right Arrow -->
+                <button type="button" onclick="triggerOneTapSync()" id="ios-hero-cta"
+                  class="mt-4 w-full bg-white hover:bg-zinc-50 active:scale-[0.99] rounded-full pl-5 pr-2 py-2 flex items-center justify-between shadow-soft transition-all group">
+                  <span id="ios-hero-cta-text" class="text-xs font-extrabold text-zinc-900 tabular-nums">
+                    Back Up 14 Items Now
+                  </span>
+                  <span id="ios-hero-cta-icon" class="w-8 h-8 rounded-full bg-pillnav text-white flex items-center justify-center group-hover:translate-x-0.5 transition-transform">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
+                    </svg>
+                  </span>
+                </button>
+              </div>
+            </div>
+
+            <!-- 3 Pastel Action Chips (Matches "Upload / Folder / Scan" in Center Screen) -->
+            <div class="grid grid-cols-3 gap-2 pt-0.5">
+              <button type="button" onclick="triggerOneTapSync()"
+                class="py-2.5 px-3 rounded-full bg-[#DFF2E6] hover:brightness-95 text-zinc-900 text-xs font-bold flex items-center justify-center gap-1.5 transition-all">
+                <svg class="w-3.5 h-3.5 text-emerald-700" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/></svg>
+                <span>1-Tap</span>
+              </button>
+              <button type="button" onclick="switchIosTab('photos')"
+                class="py-2.5 px-3 rounded-full bg-[#FADCE6] hover:brightness-95 text-zinc-900 text-xs font-bold flex items-center justify-center gap-1.5 transition-all">
+                <svg class="w-3.5 h-3.5 text-rose-700" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5"/></svg>
+                <span>Select</span>
+              </button>
+              <button type="button" onclick="switchIosTab('queue')"
+                class="py-2.5 px-3 rounded-full bg-[#DCEBFF] hover:brightness-95 text-zinc-900 text-xs font-bold flex items-center justify-center gap-1.5 transition-all">
+                <svg class="w-3.5 h-3.5 text-electric" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 12h16.5m-16.5 3.75h16.5M3.75 19.5h16.5M5.625 4.5h12.75a1.875 1.875 0 010 3.75H5.625a1.875 1.875 0 010-3.75z"/></svg>
+                <span>Queue</span>
+              </button>
+            </div>
+
+          </div>
+
+          <!-- ================================================================= -->
+          <!-- IPHONE SCREEN 2: PHOTOS (Matches Bottom-Left "Photos / Album")    -->
+          <!-- ================================================================= -->
+          <div id="ios-screen-photos" class="hidden space-y-4">
+            <!-- Top Nav Header -->
+            <div class="flex items-center justify-between pt-1">
+              <button type="button" onclick="switchIosTab('home')"
+                class="w-10 h-10 rounded-full bg-white border border-zinc-200/80 flex items-center justify-center text-zinc-800 hover:bg-zinc-100">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18"/></svg>
+              </button>
+              <h2 class="text-base font-extrabold text-zinc-900">Selective Sync</h2>
+              <button type="button" onclick="toggleSelectAllUnsynced()" id="ios-select-all-btn"
+                class="px-3 h-9 rounded-full bg-white border border-zinc-200/80 text-[11px] font-bold text-electric hover:bg-zinc-50">
+                All New
+              </button>
+            </div>
+
+            <!-- Search / Filter Bar -->
+            <div class="bg-white rounded-full px-4 py-2.5 flex items-center justify-between shadow-soft">
+              <div class="flex items-center gap-2 text-xs text-zinc-500">
+                <svg class="w-4 h-4 text-zinc-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"/></svg>
+                <span id="ios-photo-filter-summary">Skipping 4,806 already on Samsung</span>
+              </div>
+              <span class="text-[11px] font-mono font-bold text-emerald-600">SHA-256</span>
+            </div>
+
+            <!-- Segmented Pill Toggle ("Album" vs "Timeline" in Reference) -->
+            <div class="grid grid-cols-2 gap-2.5">
+              <button type="button" onclick="setPhotoFilter('unsynced')" id="seg-btn-unsynced"
+                class="py-2.5 rounded-full text-xs font-bold bg-electric text-white shadow-xs transition-all tabular-nums">
+                Unsynced (14)
+              </button>
+              <button type="button" onclick="setPhotoFilter('all')" id="seg-btn-all"
+                class="py-2.5 rounded-full text-xs font-bold bg-white text-zinc-700 hover:bg-zinc-100 transition-all tabular-nums">
+                All Library (18)
+              </button>
+            </div>
+
+            <!-- 2-Column Rounded Photo Cards Grid (Matches Summer Memories / Paris Vacation) -->
+            <div id="ios-photo-grid" class="grid grid-cols-2 gap-3 pt-1">
+              <!-- Populated by JS -->
+            </div>
+
+            <!-- Sticky Action Button When Items Selected -->
+            <div class="pt-1">
+              <button type="button" onclick="syncSelectedPhotos()" id="ios-sync-selected-btn"
+                class="w-full py-3.5 px-5 rounded-full bg-electric hover:bg-blue-700 active:scale-[0.99] text-white text-xs font-extrabold shadow-md flex items-center justify-between transition-all">
+                <span id="ios-sync-selected-label" class="tabular-nums">Push 3 Selected Photos</span>
+                <span id="ios-sync-selected-mb" class="font-mono text-[11px] opacity-90 tabular-nums">21.5 MB &rarr;</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- ================================================================= -->
+          <!-- IPHONE SCREEN 3: FILE UPLOAD QUEUE (Matches Bottom-Center Screen) -->
+          <!-- ================================================================= -->
+          <div id="ios-screen-queue" class="hidden space-y-4">
+            <!-- Top Nav Header -->
+            <div class="flex items-center justify-between pt-1">
+              <button type="button" onclick="switchIosTab('home')"
+                class="w-10 h-10 rounded-full bg-white border border-zinc-200/80 flex items-center justify-center text-zinc-800 hover:bg-zinc-100">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18"/></svg>
+              </button>
+              <h2 class="text-base font-extrabold text-zinc-900">File Upload</h2>
+              <button type="button" onclick="triggerOneTapSync()"
+                class="w-10 h-10 rounded-full bg-white border border-zinc-200/80 flex items-center justify-center text-zinc-800 hover:bg-zinc-100" title="Start All">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/></svg>
+              </button>
+            </div>
+
+            <!-- Section Subheader ("In Progress" + Down Arrow + Dots) -->
+            <div class="flex items-center justify-between pt-1">
+              <span id="ios-queue-status-label" class="text-sm font-extrabold text-zinc-900">In Progress</span>
+              <div class="flex items-center gap-1.5">
+                <span class="w-7 h-7 rounded-full bg-white flex items-center justify-center text-zinc-700 shadow-xs">
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 13.5L12 21m0 0l-7.5-7.5M12 21V3"/></svg>
+                </span>
+                <span class="px-2.5 py-1 rounded-full bg-white text-[11px] font-mono font-bold text-zinc-700 shadow-xs tabular-nums" id="ios-queue-count-badge">
+                  14 items
+                </span>
+              </div>
+            </div>
+
+            <!-- Upload Progress Cards (Exact Match to "Maya Jinna Sohana 80%" Rows) -->
+            <div id="ios-upload-queue-list" class="space-y-2.5">
+              <!-- Populated by JS -->
+            </div>
+          </div>
+
+        </div>
+
+        <!-- =================================================================== -->
+        <!-- SIGNATURE FLOATING BLACK PILL BOTTOM NAV BAR (Matches Reference)    -->
+        <!-- =================================================================== -->
+        <div class="absolute bottom-5 inset-x-6 z-30">
+          <nav aria-label="iPhone Navigation" class="bg-pillnav rounded-full p-2 flex items-center justify-between shadow-pill">
+            <!-- Tab 1: Home -->
+            <button type="button" onclick="switchIosTab('home')" id="ios-nav-home"
+              aria-label="Home"
+              class="w-10 h-10 rounded-full bg-white text-zinc-900 flex items-center justify-center transition-all">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12l8.954-8.955c.44-.439 1.152-.439 1.591 0L21.75 12M4.5 9.75v10.125c0 .621.504 1.125 1.125 1.125H9.75v-4.875c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21h4.125c.621 0 1.125-.504 1.125-1.125V9.75M8.25 21h8.25" />
+              </svg>
+            </button>
+
+            <!-- Tab 2: Photos Grid -->
+            <button type="button" onclick="switchIosTab('photos')" id="ios-nav-photos"
+              aria-label="Selective Photos"
+              class="w-10 h-10 rounded-full text-white/70 hover:text-white flex items-center justify-center transition-all">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5zm10.5-11.25h.008v.008h-.008V8.25zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z" />
+              </svg>
+            </button>
+
+            <!-- CENTER ELECTRIC BLUE 1-TAP SYNC TRIGGER BUTTON -->
+            <button type="button" onclick="triggerOneTapSync()" id="ios-nav-center-plus"
+              title="1-Tap Catch-Up Sync"
+              class="w-11 h-11 rounded-full bg-electric hover:bg-blue-600 active:scale-90 text-white flex items-center justify-center shadow-md transition-all">
+              <svg id="ios-center-btn-icon" class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+              </svg>
+            </button>
+
+            <!-- Tab 3: Upload Queue -->
+            <button type="button" onclick="switchIosTab('queue')" id="ios-nav-queue"
+              aria-label="Upload Progress"
+              class="w-10 h-10 rounded-full text-white/70 hover:text-white flex items-center justify-center transition-all relative">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+              </svg>
+            </button>
+
+            <!-- Tab 4: Switch to Samsung Receiver Focus -->
+            <button type="button" onclick="switchSamsungTab('settings')" id="ios-nav-info"
+              aria-label="Watermark Info"
+              class="w-10 h-10 rounded-full text-white/70 hover:text-white flex items-center justify-center transition-all">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
+              </svg>
+            </button>
+          </nav>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ======================================================================= -->
+    <!-- DEVICE 2: SAMSUNG GALAXY S24 ULTRA (ANDROID APK RECEIVER SERVER)        -->
+    <!-- ======================================================================= -->
+    <section id="frame-samsung" aria-label="Samsung S24 Ultra Android APK Server" class="w-full max-w-[380px] flex flex-col items-center">
+      <!-- Subtle Device Label Above Phone -->
+      <div class="mb-3 flex items-center gap-2">
+        <span class="px-3 py-1 rounded-full bg-pillnav text-white text-[11px] font-bold tracking-wide uppercase shadow-xs">
+          Android APK &bull; Receiver Server
+        </span>
+        <span class="text-xs font-medium text-zinc-600">Samsung S24 Ultra</span>
+      </div>
+
+      <!-- Samsung S24 Ultra Hardware Shell (Slightly sharper corners + punch-hole camera) -->
+      <div class="w-full h-[790px] bg-appbg rounded-[38px] shadow-phone relative overflow-hidden flex flex-col justify-between select-none">
+        
+        <!-- Top Android Status Bar + Punch Hole Camera -->
+        <div class="px-6 pt-3.5 pb-2 flex items-center justify-between text-xs font-bold text-zinc-900 z-20">
+          <span class="tabular-nums">11:30</span>
+          <!-- S24 Punch-Hole Camera -->
+          <div class="w-3.5 h-3.5 rounded-full bg-pillnav flex items-center justify-center">
+            <div class="w-1.5 h-1.5 rounded-full bg-zinc-700"></div>
+          </div>
+          <div class="flex items-center gap-1.5">
+            <span class="text-[10px] font-mono font-bold px-1.5 py-0.2 bg-zinc-200 rounded text-zinc-700">VPN</span>
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8.288 15.038a5.25 5.25 0 017.424 0M5.106 11.856c3.807-3.808 9.98-3.808 13.788 0M1.924 8.674c5.565-5.565 14.587-5.565 20.152 0"/></svg>
+            <span class="text-[11px] font-mono tabular-nums">94%</span>
+          </div>
+        </div>
+
+        <!-- SCROLLABLE VIEWPORT CONTAINER FOR SAMSUNG APK SCREENS -->
+        <div class="flex-1 overflow-y-auto no-scrollbar px-5 pt-1 pb-24 relative">
+
+          <!-- ================================================================= -->
+          <!-- SAMSUNG SCREEN 1: FOLDERS & SERVER HOME (Matches Center Mint UI)  -->
+          <!-- ================================================================= -->
+          <div id="sam-screen-home" class="space-y-4">
+            
+            <!-- Header Row ("Dropbox" + Upload & Check Circle Buttons in Center Reference) -->
+            <div class="flex items-center justify-between pt-1">
+              <div>
+                <h2 class="text-[24px] font-extrabold tracking-tight text-zinc-900 leading-none">DropServer</h2>
+                <p class="text-[11px] font-medium text-zinc-500 mt-1 tabular-nums" id="sam-subtitle-ip">
+                  Tailscale &bull; 100.76.50.39:8080
+                </p>
+              </div>
+              <div class="flex items-center gap-2">
+                <button type="button" onclick="toggleServerOnline()" id="sam-server-toggle-btn"
+                  title="Toggle HTTP Receiver Daemon"
+                  class="w-10 h-10 rounded-full bg-white border border-zinc-200/80 flex items-center justify-center text-emerald-600 hover:bg-zinc-50 transition-colors">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M5.636 5.636a9 9 0 1012.728 0M12 3v9" />
+                  </svg>
+                </button>
+                <button type="button" onclick="switchSamsungTab('settings')"
+                  title="Server High-Watermark Ledger"
+                  class="w-10 h-10 rounded-full bg-white border border-zinc-200/80 flex items-center justify-center text-zinc-800 hover:bg-zinc-50 transition-colors">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            <!-- Endpoint Pill Bar -->
+            <div class="bg-white rounded-full px-4 py-3 flex items-center justify-between shadow-soft">
+              <div class="flex items-center gap-2 min-w-0">
+                <span id="sam-daemon-dot" class="w-2.5 h-2.5 rounded-full bg-emerald-500 flex-shrink-0"></span>
+                <span id="sam-endpoint-text" class="text-xs font-mono text-zinc-600 truncate">
+                  GET /d/tk_8821/sync/status
+                </span>
+              </div>
+              <span id="sam-http-badge" class="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
+                200 OK
+              </span>
+            </div>
+
+            <!-- 3 Pastel Quick Pills (Matches "Upload / Folder / Scan" Row in Reference) -->
+            <div class="grid grid-cols-3 gap-2">
+              <button type="button" onclick="switchSamsungTab('stream')"
+                class="py-2.5 px-2.5 rounded-full bg-[#DFF2E6] text-zinc-900 text-[11px] font-bold flex items-center justify-center gap-1.5">
+                <span class="w-2 h-2 rounded-full bg-emerald-600"></span>
+                <span id="sam-pill-count" class="tabular-nums">4,806 In</span>
+              </button>
+              <button type="button" onclick="switchSamsungTab('settings')"
+                class="py-2.5 px-2.5 rounded-full bg-[#FADCE6] text-zinc-900 text-[11px] font-bold flex items-center justify-center gap-1.5">
+                <span class="tabular-nums" id="sam-pill-free">142 GB Free</span>
+              </button>
+              <button type="button" onclick="switchSamsungTab('settings')"
+                class="py-2.5 px-2.5 rounded-full bg-[#DCEBFF] text-zinc-900 text-[11px] font-bold flex items-center justify-center gap-1.5">
+                <span>QR Pair</span>
+              </button>
+            </div>
+
+            <!-- MINT GREEN FOLDER CONTAINER (Exact Match to Center Screen in Reference) -->
+            <div class="bg-mint-card rounded-[28px] p-4 shadow-soft space-y-2.5">
+              <div class="flex items-center justify-between px-1 pb-1">
+                <span class="text-xs font-extrabold text-zinc-900">Samsung Storage Folders &uarr;</span>
+                <span class="w-7 h-7 rounded-full bg-white/80 flex items-center justify-center text-zinc-700">
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5"/></svg>
+                </span>
+              </div>
+
+              <!-- White Inner Row 1: Camera Roll Sync -->
+              <div onclick="switchSamsungTab('stream')" class="bg-white rounded-2xl p-3 flex items-center justify-between shadow-xs cursor-pointer hover:scale-[1.01] transition-transform">
+                <div class="flex items-center gap-3">
+                  <div class="w-10 h-10 rounded-xl bg-[#DFF2E6] text-emerald-700 flex items-center justify-center">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5z"/></svg>
+                  </div>
+                  <div>
+                    <div class="text-xs font-extrabold text-zinc-900">DCIM / iPhone_17_Pro</div>
+                    <div id="sam-folder-photos-meta" class="text-[11px] font-medium text-zinc-500 tabular-nums">60.5 GB &bull; 4,510 HEIC</div>
+                  </div>
+                </div>
+                <span class="text-zinc-400 font-bold text-sm px-1">&bull;&bull;&bull;</span>
+              </div>
+
+              <!-- White Inner Row 2: 4K Videos -->
+              <div onclick="switchSamsungTab('stream')" class="bg-white rounded-2xl p-3 flex items-center justify-between shadow-xs cursor-pointer hover:scale-[1.01] transition-transform">
+                <div class="flex items-center gap-3">
+                  <div class="w-10 h-10 rounded-xl bg-[#DCEBFF] text-electric flex items-center justify-center">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 10.5l4.72-4.72a.75.75 0 011.28.53v11.38a.75.75 0 01-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 002.25-2.25v-9a2.25 2.25 0 00-2.25-2.25h-9A2.25 2.25 0 002.25 7.5v9a2.25 2.25 0 002.25 2.25z"/></svg>
+                  </div>
+                  <div>
+                    <div class="text-xs font-extrabold text-zinc-900">Movies / iPhone_4K60</div>
+                    <div id="sam-folder-videos-meta" class="text-[11px] font-medium text-zinc-500 tabular-nums">10.5 GB &bull; 214 MOV</div>
+                  </div>
+                </div>
+                <span class="text-zinc-400 font-bold text-sm px-1">&bull;&bull;&bull;</span>
+              </div>
+
+              <!-- White Inner Row 3: ProRAW Captures -->
+              <div onclick="switchSamsungTab('stream')" class="bg-white rounded-2xl p-3 flex items-center justify-between shadow-xs cursor-pointer hover:scale-[1.01] transition-transform">
+                <div class="flex items-center gap-3">
+                  <div class="w-10 h-10 rounded-xl bg-[#FFF1B8] text-amber-700 flex items-center justify-center font-mono text-xs font-extrabold">
+                    DNG
+                  </div>
+                  <div>
+                    <div class="text-xs font-extrabold text-zinc-900">DCIM / ProRAW_Lossless</div>
+                    <div id="sam-folder-raw-meta" class="text-[11px] font-medium text-zinc-500 tabular-nums">8.4 GB &bull; 82 DNG</div>
+                  </div>
+                </div>
+                <span class="text-zinc-400 font-bold text-sm px-1">&bull;&bull;&bull;</span>
+              </div>
+
+              <!-- White Inner Row 4: High-Watermark SQLite/JSON Ledger -->
+              <div onclick="switchSamsungTab('settings')" class="bg-white rounded-2xl p-3 flex items-center justify-between shadow-xs cursor-pointer hover:scale-[1.01] transition-transform">
+                <div class="flex items-center gap-3">
+                  <div class="w-10 h-10 rounded-xl bg-[#FADCE6] text-rose-600 flex items-center justify-center">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375"/></svg>
+                  </div>
+                  <div>
+                    <div class="text-xs font-extrabold text-zinc-900">sync_ledger.sqlite</div>
+                    <div id="sam-folder-ledger-meta" class="text-[11px] font-mono text-zinc-500 tabular-nums">Watermark: Nov 8, 14:32</div>
+                  </div>
+                </div>
+                <span class="text-zinc-400 font-bold text-sm px-1">&bull;&bull;&bull;</span>
+              </div>
+            </div>
+
+          </div>
+
+          <!-- ================================================================= -->
+          <!-- SAMSUNG SCREEN 2: INCOMING STREAM (Real-time Receiver Feed)       -->
+          <!-- ================================================================= -->
+          <div id="sam-screen-stream" class="hidden space-y-4">
+            <div class="flex items-center justify-between pt-1">
+              <button type="button" onclick="switchSamsungTab('home')"
+                class="w-10 h-10 rounded-full bg-white border border-zinc-200/80 flex items-center justify-center text-zinc-800 hover:bg-zinc-100">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18"/></svg>
+              </button>
+              <h2 class="text-base font-extrabold text-zinc-900">Incoming Stream</h2>
+              <span id="sam-stream-live-pill" class="px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-extrabold uppercase">
+                Listening
+              </span>
+            </div>
+
+            <!-- High-Watermark Banner Card -->
+            <div class="bg-white rounded-[24px] p-4 shadow-soft flex items-center justify-between">
+              <div>
+                <div class="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider">High-Watermark Timestamp</div>
+                <div id="sam-stream-watermark" class="text-sm font-mono font-bold text-zinc-900 mt-0.5 tabular-nums">
+                  2026-11-08 14:32:10
+                </div>
+              </div>
+              <div class="text-right">
+                <div class="text-[11px] font-semibold text-zinc-400">Total Stored</div>
+                <div id="sam-stream-total" class="text-sm font-extrabold text-electric tabular-nums">4,806 items</div>
+              </div>
+            </div>
+
+            <!-- Incoming File Feed Rows -->
+            <div class="flex items-center justify-between pt-1">
+              <span class="text-xs font-extrabold text-zinc-900">Recently Written to Disk</span>
+              <span class="text-[11px] font-mono text-zinc-500">POST /upload</span>
+            </div>
+
+            <div id="sam-incoming-list" class="space-y-2.5">
+              <!-- Populated by JS as files arrive from iPhone -->
+            </div>
+          </div>
+
+          <!-- ================================================================= -->
+          <!-- SAMSUNG SCREEN 3: SERVER PLAN & WATERMARK API (Top-Right Ref)     -->
+          <!-- ================================================================= -->
+          <div id="sam-screen-settings" class="hidden space-y-4">
+            <div class="flex items-center justify-between pt-1">
+              <button type="button" onclick="switchSamsungTab('home')"
+                class="w-10 h-10 rounded-full bg-white border border-zinc-200/80 flex items-center justify-center text-zinc-800 hover:bg-zinc-100">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18"/></svg>
+              </button>
+              <h2 class="text-base font-extrabold text-zinc-900">Server Node</h2>
+              <div class="w-10 h-10 rounded-full bg-white border border-zinc-200/80 flex items-center justify-center text-zinc-800">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L6.832 19.82a4.5 4.5 0 01-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 011.13-1.897L16.863 4.487zm0 0L19.5 7.125"/></svg>
+              </div>
+            </div>
+
+            <!-- "Your Plan / Dropbox Basic Free" Equivalent Storage Card -->
+            <div class="bg-white rounded-[26px] p-4 shadow-soft space-y-3">
+              <div class="flex items-start gap-3">
+                <div class="w-11 h-11 rounded-2xl bg-blue-50 text-electric flex items-center justify-center flex-shrink-0">
+                  <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2L4.5 6.5 12 11l7.5-4.5L12 2zm-7.5 9L12 15.5 19.5 11 12 6.5 4.5 11zm7.5 6.5l-7.5-4.5v3L12 20.5l7.5-4.5v-3L12 17.5z"/></svg>
+                </div>
+                <div class="flex-1">
+                  <div class="text-[11px] font-medium text-zinc-400">Samsung Internal UFS 4.0</div>
+                  <div class="flex items-center gap-2">
+                    <span class="text-sm font-extrabold text-zinc-900">256 GB Storage</span>
+                    <span id="sam-free-pill" class="px-2 py-0.5 rounded-full bg-electric text-white text-[10px] font-bold tabular-nums">142.4 GB Free</span>
+                  </div>
+                  <p class="text-[11px] text-zinc-500 mt-0.5">Zero cloud fees &bull; Direct local / Tailscale transfer</p>
+                </div>
+              </div>
+
+              <!-- White Pill Button with Black Right Arrow (Matches "Manage Your Plan ->") -->
+              <button type="button" onclick="triggerOneTapSync()"
+                class="w-full bg-appbg hover:bg-zinc-200/70 rounded-full pl-4 pr-1.5 py-1.5 flex items-center justify-between transition-colors">
+                <span class="text-xs font-bold text-zinc-800">Trigger Catch-Up From iPhone</span>
+                <span class="w-7 h-7 rounded-full bg-pillnav text-white flex items-center justify-center">
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3"/></svg>
+                </span>
+              </button>
+            </div>
+
+            <!-- 3 Stacked Settings Rows (Matches "Camera Uploads / Link your desktop / Recover") -->
+            <div class="space-y-2.5">
+              <div class="bg-white rounded-2xl p-3 flex items-center justify-between shadow-soft">
+                <div class="flex items-center gap-3">
+                  <div class="w-10 h-10 rounded-xl bg-[#DCEBFF] text-electric flex items-center justify-center">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6.827 6.175A2.31 2.31 0 015.186 7.23c-.38.054-.757.112-1.134.175C2.999 7.58 2.25 8.507 2.25 9.574V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9.574c0-1.067-.75-1.994-1.802-2.169a47.865 47.865 0 00-1.134-.175 2.31 2.31 0 01-1.64-1.055l-.822-1.316a2.192 2.192 0 00-1.736-1.039 48.774 48.774 0 00-5.232 0 2.192 2.192 0 00-1.736 1.039l-.821 1.316z"/></svg>
+                  </div>
+                  <div>
+                    <div class="text-xs font-extrabold text-zinc-900">High-Watermark Auto Resume</div>
+                    <div class="text-[11px] text-zinc-500">Returns latest_captured_at timestamp</div>
+                  </div>
+                </div>
+                <span class="text-zinc-500 pr-1">&rarr;</span>
+              </div>
+
+              <div class="bg-white rounded-2xl p-3 flex items-center justify-between shadow-soft">
+                <div class="flex items-center gap-3">
+                  <div class="w-10 h-10 rounded-xl bg-[#DFF2E6] text-emerald-700 flex items-center justify-center">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13.19 8.688a4.5 4.5 0 011.242 7.244l-4.5 4.5a4.5 4.5 0 01-6.364-6.364l1.757-1.757m13.35-.622l1.757-1.757a4.5 4.5 0 00-6.364-6.364l-4.5 4.5a4.5 4.5 0 001.242 7.244"/></svg>
+                  </div>
+                  <div>
+                    <div class="text-xs font-extrabold text-zinc-900">iOS Action Button Shortcut</div>
+                    <div class="text-[11px] text-zinc-500">Bound to token /d/tk_8821/upload</div>
+                  </div>
+                </div>
+                <span class="text-zinc-500 pr-1">&rarr;</span>
+              </div>
+
+              <div class="bg-white rounded-2xl p-3 flex items-center justify-between shadow-soft">
+                <div class="flex items-center gap-3">
+                  <div class="w-10 h-10 rounded-xl bg-[#FFF1B8] text-amber-700 flex items-center justify-center">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z"/></svg>
+                  </div>
+                  <div>
+                    <div class="text-xs font-extrabold text-zinc-900">SHA-256 Deduplication Guard</div>
+                    <div class="text-[11px] text-zinc-500">Skips identical files in Selective Mode</div>
+                  </div>
+                </div>
+                <span class="text-zinc-500 pr-1">&rarr;</span>
+              </div>
+            </div>
+
+            <!-- Live JSON Response Preview -->
+            <div class="bg-pillnav rounded-2xl p-3 text-[10px] font-mono text-zinc-300 space-y-1">
+              <div class="text-emerald-400 font-bold">// GET /d/tk_8821/sync/status</div>
+              <div id="sam-json-watermark">"latest_captured_at": "2026-11-08 14:32:10",</div>
+              <div id="sam-json-count">"backed_up_assets": 4806,</div>
+              <div id="sam-json-free">"free_space_gb": 142.4</div>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- =================================================================== -->
+        <!-- SAMSUNG FLOATING BLACK PILL BOTTOM NAV BAR                          -->
+        <!-- =================================================================== -->
+        <div class="absolute bottom-5 inset-x-6 z-30">
+          <nav aria-label="Samsung APK Navigation" class="bg-pillnav rounded-full p-2 flex items-center justify-between shadow-pill">
+            <!-- Tab 1: Folders Home -->
+            <button type="button" onclick="switchSamsungTab('home')" id="sam-nav-home"
+              aria-label="Server Home"
+              class="w-10 h-10 rounded-full bg-white text-zinc-900 flex items-center justify-center transition-all">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" />
+              </svg>
+            </button>
+
+            <!-- Tab 2: Live Stream -->
+            <button type="button" onclick="switchSamsungTab('stream')" id="sam-nav-stream"
+              aria-label="Incoming Stream"
+              class="w-10 h-10 rounded-full text-white/70 hover:text-white flex items-center justify-center transition-all">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+              </svg>
+            </button>
+
+            <!-- Center Electric Blue Server Pulse / Trigger Button -->
+            <button type="button" onclick="switchSamsungTab('stream')"
+              title="Inspect Incoming Stream"
+              class="w-11 h-11 rounded-full bg-electric hover:bg-blue-600 active:scale-90 text-white flex items-center justify-center shadow-md transition-all">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.3" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+            </button>
+
+            <!-- Tab 3: Settings / Watermark API -->
+            <button type="button" onclick="switchSamsungTab('settings')" id="sam-nav-settings"
+              aria-label="Server Settings"
+              class="w-10 h-10 rounded-full text-white/70 hover:text-white flex items-center justify-center transition-all">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M10.343 3.94c.09-.542.56-.94 1.11-.94h1.093c.55 0 1.02.398 1.11.94l.149.894c.07.424.384.764.78.93.398.164.855.142 1.205-.108l.737-.527a1.125 1.125 0 011.45.12l.773.774c.39.389.44 1.002.12 1.45l-.527.737c-.25.35-.272.806-.107 1.204.165.397.505.71.93.78l.893.15c.543.09.94.56.94 1.109v1.094c0 .55-.397 1.02-.94 1.11l-.893.149c-.425.07-.765.383-.93.78-.165.398-.143.854.107 1.204l.527.738c.32.447.269 1.06-.12 1.45l-.774.773a1.125 1.125 0 01-1.449.12l-.738-.527c-.35-.25-.806-.272-1.203-.107-.397.165-.71.505-.781.929l-.149.894c-.09.542-.56.94-1.11.94h-1.094c-.55 0-1.019-.398-1.11-.94l-.148-.894c-.071-.424-.384-.764-.781-.93-.398-.164-.854-.142-1.204.108l-.738.527c-.447.32-1.06.269-1.45-.12l-.773-.774a1.125 1.125 0 01-.12-1.45l.527-.737c.25-.35.273-.806.108-1.204-.165-.397-.505-.71-.93-.78l-.894-.15c-.542-.09-.94-.56-.94-1.109v-1.094c0-.55.398-1.02.94-1.11l.894-.149c.424-.07.765-.383.93-.78.165-.398.143-.854-.108-1.204l-.526-.738a1.125 1.125 0 01.12-1.45l.773-.773a1.125 1.125 0 011.45-.12l.737.527c.35.25.807.272 1.204.107.397-.165.71-.505.78-.929l.15-.894z" />
+              </svg>
+            </button>
+
+            <!-- Tab 4: Power Toggle -->
+            <button type="button" onclick="toggleServerOnline()" id="sam-nav-power"
+              aria-label="Toggle Server"
+              class="w-10 h-10 rounded-full text-emerald-400 hover:text-emerald-300 flex items-center justify-center transition-all">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M5.636 5.636a9 9 0 1012.728 0M12 3v9" />
+              </svg>
+            </button>
+          </nav>
+        </div>
+
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ========================================================================= -->
+  <!-- DUAL-DEVICE REALTIME SYNC ENGINE                                          -->
+  <!-- ========================================================================= -->
+  <script>
+    const BASE = "{{BASE}}";
+    const TOKEN = "{{TOKEN}}";
+    const BATCH = (Math.random().toString(36).slice(2, 8) + Date.now().toString(36)).slice(0, 12);
+
+    function pickRealPhotos() {
+      const picker = document.getElementById('real-file-picker');
+      if (picker) picker.click();
+    }
+
+    const INITIAL_ITEMS = [
+      // 4 Already Synced Items (Captured <= 2026-11-08 14:32:10)
+      { id: 'm1', title: 'Summer Memories', name: 'IMG_4803.HEIC', category: 'photo', sizeMB: 3.2, dateLabel: 'Nov 8 • 13:50', capturedAt: '2026-11-08 13:50:12', synced: true, selected: false, progress: 100, url: 'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=400&q=80' },
+      { id: 'm2', title: 'Paris Vacation',  name: 'IMG_4804.HEIC', category: 'photo', sizeMB: 4.1, dateLabel: 'Nov 8 • 14:12', capturedAt: '2026-11-08 14:12:05', synced: true, selected: false, progress: 100, url: 'https://images.unsplash.com/photo-1502602898657-3e91760cbb34?auto=format&fit=crop&w=400&q=80' },
+      { id: 'm3', title: 'Trip to Samui',   name: 'IMG_4805.DNG',  category: 'raw',   sizeMB: 18.4, dateLabel: 'Nov 8 • 14:28', capturedAt: '2026-11-08 14:28:44', synced: true, selected: false, progress: 100, url: 'https://images.unsplash.com/photo-1506744038136-46273834b3fb?auto=format&fit=crop&w=400&q=80' },
+      { id: 'm4', title: 'Nature of Cubes', name: 'IMG_4806.HEIC', category: 'photo', sizeMB: 2.8, dateLabel: 'Nov 8 • 14:32', capturedAt: '2026-11-08 14:32:10', synced: true, selected: false, progress: 100, url: 'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?auto=format&fit=crop&w=400&q=80' },
+
+      // 14 Unsynced Delta Items (Captured > 2026-11-08 14:32:10)
+      { id: 'm5',  title: 'Golden Coastline', name: 'IMG_4807.HEIC', category: 'photo', sizeMB: 3.4, dateLabel: 'Nov 8 • 15:04', capturedAt: '2026-11-08 15:04:19', synced: false, selected: true,  progress: 0, url: 'https://images.unsplash.com/photo-1501785888041-af3ef285b470?auto=format&fit=crop&w=400&q=80' },
+      { id: 'm6',  title: 'Alpine Ridge',     name: 'IMG_4808.HEIC', category: 'photo', sizeMB: 3.9, dateLabel: 'Nov 8 • 15:18', capturedAt: '2026-11-08 15:18:02', synced: false, selected: true,  progress: 0, url: 'https://images.unsplash.com/photo-1469474968028-56623f02e42e?auto=format&fit=crop&w=400&q=80' },
+      { id: 'm7',  title: 'Sunset Reel 4K',   name: 'MOV_4809.MOV',  category: 'video', sizeMB: 14.2, dateLabel: 'Nov 8 • 16:02', capturedAt: '2026-11-08 16:02:51', synced: false, selected: true,  progress: 0, url: 'https://images.unsplash.com/photo-1472214103451-9374bd1c798e?auto=format&fit=crop&w=400&q=80' },
+      { id: 'm8',  title: 'Starlight Peak',   name: 'IMG_4810.HEIC', category: 'photo', sizeMB: 2.7, dateLabel: 'Nov 8 • 16:40', capturedAt: '2026-11-08 16:40:11', synced: false, selected: false, progress: 0, url: 'https://images.unsplash.com/photo-1519681393784-d120267933ba?auto=format&fit=crop&w=400&q=80' },
+      { id: 'm9',  title: 'Forest ProRAW',    name: 'RAW_4811.DNG',  category: 'raw',   sizeMB: 12.8, dateLabel: 'Nov 8 • 17:15', capturedAt: '2026-11-08 17:15:33', synced: false, selected: false, progress: 0, url: 'https://images.unsplash.com/photo-1441974231531-c6227db76b6e?auto=format&fit=crop&w=400&q=80' },
+      { id: 'm10', title: 'Desert Highway',   name: 'IMG_4812.HEIC', category: 'photo', sizeMB: 3.1, dateLabel: 'Nov 8 • 18:05', capturedAt: '2026-11-08 18:05:49', synced: false, selected: false, progress: 0, url: 'https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=400&q=80' },
+      { id: 'm11', title: 'Misty Valley',     name: 'IMG_4813.HEIC', category: 'photo', sizeMB: 2.9, dateLabel: 'Nov 8 • 18:22', capturedAt: '2026-11-08 18:22:10', synced: false, selected: false, progress: 0, url: 'https://images.unsplash.com/photo-1493246507139-91e8fad9978e?auto=format&fit=crop&w=400&q=80' },
+      { id: 'm12', title: 'Redwood Trail',    name: 'IMG_4814.HEIC', category: 'photo', sizeMB: 3.6, dateLabel: 'Nov 8 • 19:11', capturedAt: '2026-11-08 19:11:04', synced: false, selected: false, progress: 0, url: 'https://images.unsplash.com/photo-1511497584788-876760111969?auto=format&fit=crop&w=400&q=80' },
+      { id: 'm13', title: 'Night Hyperlapse', name: 'MOV_4815.MOV',  category: 'video', sizeMB: 8.4, dateLabel: 'Nov 8 • 20:01', capturedAt: '2026-11-08 20:01:38', synced: false, selected: false, progress: 0, url: 'https://images.unsplash.com/photo-1465146344425-f00d5f5c8f07?auto=format&fit=crop&w=400&q=80' },
+      { id: 'm14', title: 'Cascade Falls',    name: 'IMG_4816.HEIC', category: 'photo', sizeMB: 2.5, dateLabel: 'Nov 9 • 07:45', capturedAt: '2026-11-09 07:45:12', synced: false, selected: false, progress: 0, url: 'https://images.unsplash.com/photo-1433086966358-54859d0ed716?auto=format&fit=crop&w=400&q=80' },
+      { id: 'm15', title: 'Morning Pier',     name: 'IMG_4817.HEIC', category: 'photo', sizeMB: 3.0, dateLabel: 'Nov 9 • 08:12', capturedAt: '2026-11-09 08:12:29', synced: false, selected: false, progress: 0, url: 'https://images.unsplash.com/photo-1475924156734-496f6cac6ec1?auto=format&fit=crop&w=400&q=80' },
+      { id: 'm16', title: 'Sunlit Canopy',    name: 'RAW_4818.DNG',  category: 'raw',   sizeMB: 2.4, dateLabel: 'Nov 9 • 08:30', capturedAt: '2026-11-09 08:30:00', synced: false, selected: false, progress: 0, url: 'https://images.unsplash.com/photo-1502082553048-f009c37129b9?auto=format&fit=crop&w=400&q=80' },
+      { id: 'm17', title: 'Autumn Path',      name: 'IMG_4819.HEIC', category: 'photo', sizeMB: 2.8, dateLabel: 'Nov 9 • 09:05', capturedAt: '2026-11-09 09:05:17', synced: false, selected: false, progress: 0, url: 'https://images.unsplash.com/photo-1447752875215-b2761acb3c5d?auto=format&fit=crop&w=400&q=80' },
+      { id: 'm18', title: 'Mirror Lake',      name: 'IMG_4820.HEIC', category: 'photo', sizeMB: 2.7, dateLabel: 'Nov 9 • 09:18', capturedAt: '2026-11-09 09:18:42', synced: false, selected: false, progress: 0, url: 'https://images.unsplash.com/photo-1426604966848-d7adac402bff?auto=format&fit=crop&w=400&q=80' }
+    ];
+
+    const BASE_SYNCED_OFFSET = 4802;
+
+    const app = {
+      items: JSON.parse(JSON.stringify(INITIAL_ITEMS)),
+      iosTab: 'home',       // 'home' | 'photos' | 'queue'
+      samTab: 'home',       // 'home' | 'stream' | 'settings'
+      photoFilter: 'unsynced', // 'unsynced' | 'all'
+      serverOnline: true,
+      isSyncing: false,
+      syncInterval: null,
+      freeGB: 142.4,
+      photosGB: 60.5,
+      videosGB: 10.5,
+      rawGB: 8.4,
+      nextCaptureId: 4821
+    };
+
+    function getDeltaStats() {
+      const unsynced = app.items.filter(i => !i.synced);
+      const synced = app.items.filter(i => i.synced);
+      const newPhotos = unsynced.filter(i => i.category === 'photo').length;
+      const newVideos = unsynced.filter(i => i.category === 'video').length;
+      const newRaw = unsynced.filter(i => i.category === 'raw').length;
+      const totalSynced = BASE_SYNCED_OFFSET + synced.length;
+      const deltaMB = unsynced.reduce((sum, i) => sum + i.sizeMB, 0);
+      const latestSynced = synced[synced.length - 1];
+      const watermark = latestSynced ? latestSynced.capturedAt : '2026-11-08 14:32:10';
+
+      return {
+        unsynced,
+        synced,
+        unsyncedCount: unsynced.length,
+        newPhotos,
+        newVideos,
+        newRaw,
+        totalSynced,
+        deltaMB: Number(deltaMB.toFixed(1)),
+        watermark
+      };
+    }
+
+    // --- Viewport Switcher (Side-by-Side vs Single Phone) ---
+    function setViewportMode(mode) {
+      const iphone = document.getElementById('frame-iphone');
+      const samsung = document.getElementById('frame-samsung');
+      const modes = ['both', 'iphone', 'samsung'];
+
+      modes.forEach(m => {
+        const btn = document.getElementById(`view-btn-${m}`);
+        if (m === mode) {
+          btn.className = 'px-3.5 py-1.5 rounded-full text-xs font-bold bg-pillnav text-white transition-all';
+        } else {
+          btn.className = 'px-3.5 py-1.5 rounded-full text-xs font-semibold text-zinc-600 hover:text-zinc-900 transition-all';
+        }
+      });
+
+      if (mode === 'both') {
+        iphone.classList.remove('hidden');
+        samsung.classList.remove('hidden');
+      } else if (mode === 'iphone') {
+        iphone.classList.remove('hidden');
+        samsung.classList.add('hidden');
+      } else {
+        iphone.classList.add('hidden');
+        samsung.classList.remove('hidden');
+      }
+    }
+
+    // --- Navigation Tabs: iPhone PWA ---
+    function switchIosTab(tab) {
+      app.iosTab = tab;
+      ['home', 'photos', 'queue'].forEach(t => {
+        const screen = document.getElementById(`ios-screen-${t}`);
+        const navBtn = document.getElementById(`ios-nav-${t}`);
+        if (t === tab) {
+          screen.classList.remove('hidden');
+          navBtn.className = 'w-10 h-10 rounded-full bg-white text-zinc-900 flex items-center justify-center transition-all shadow-xs';
+        } else {
+          screen.classList.add('hidden');
+          navBtn.className = 'w-10 h-10 rounded-full text-white/70 hover:text-white flex items-center justify-center transition-all';
+        }
+      });
+      renderAll();
+    }
+
+    // --- Navigation Tabs: Samsung APK ---
+    function switchSamsungTab(tab) {
+      app.samTab = tab;
+      ['home', 'stream', 'settings'].forEach(t => {
+        const screen = document.getElementById(`sam-screen-${t}`);
+        const navBtn = document.getElementById(`sam-nav-${t}`);
+        if (t === tab) {
+          screen.classList.remove('hidden');
+          navBtn.className = 'w-10 h-10 rounded-full bg-white text-zinc-900 flex items-center justify-center transition-all shadow-xs';
+        } else {
+          screen.classList.add('hidden');
+          navBtn.className = 'w-10 h-10 rounded-full text-white/70 hover:text-white flex items-center justify-center transition-all';
+        }
+      });
+      renderAll();
+    }
+
+    function openSyncedFilter() {
+      app.photoFilter = 'all';
+      switchIosTab('photos');
+    }
+
+    function setPhotoFilter(filter) {
+      app.photoFilter = filter;
+      renderIosPhotosScreen();
+    }
+
+    function togglePhotoSelect(id) {
+      const item = app.items.find(i => i.id === id);
+      if (!item || item.synced) return; // Automatically skip already synced items
+      item.selected = !item.selected;
+      renderIosPhotosScreen();
+    }
+
+    function toggleSelectAllUnsynced() {
+      const unsynced = app.items.filter(i => !i.synced);
+      const allSelected = unsynced.length > 0 && unsynced.every(i => i.selected);
+      unsynced.forEach(i => { i.selected = !allSelected; });
+      renderIosPhotosScreen();
+    }
+
+    // --- Toggle Samsung Server Daemon Online/Offline ---
+    function toggleServerOnline() {
+      app.serverOnline = !app.serverOnline;
+      if (!app.serverOnline && app.isSyncing) {
+        stopSyncTimer();
+      }
+      renderAll();
+    }
+
+    // --- Trigger 1-Tap Catch-Up Sync Across Both Phones ---
+    function triggerOneTapSync() {
+      if (!app.serverOnline) {
+        toggleServerOnline();
+      }
+
+      if (app.isSyncing) {
+        stopSyncTimer();
+        renderAll();
+        return;
+      }
+
+      const stats = getDeltaStats();
+      if (stats.unsyncedCount === 0) {
+        // Already caught up: show stream verification
+        switchSamsungTab('stream');
+        renderAll();
+        return;
+      }
+
+      // Switch Samsung to Incoming Stream or keep Home visible while syncing
+      app.isSyncing = true;
+      startRealtimeSyncLoop( false );
+    }
+
+    // --- Sync Only Selected Photos (Mode B) ---
+    function syncSelectedPhotos() {
+      const selected = app.items.filter(i => !i.synced && i.selected);
+      if (selected.length === 0) return;
+      switchIosTab('queue');
+      switchSamsungTab('stream');
+      app.isSyncing = true;
+      startRealtimeSyncLoop( true );
+    }
+
+    
+    // --- Real File Picker Listener ---
+    document.addEventListener('DOMContentLoaded', () => {
+      const picker = document.getElementById('real-file-picker');
+      if (picker) {
+        picker.addEventListener('change', (e) => {
+          const files = Array.from(picker.files || []);
+          if (!files.length) return;
+
+          const now = new Date();
+          const pad = n => String(n).padStart(2, '0');
+          const timeStr = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+          const dateLabel = `Today • ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+
+          files.forEach((f, idx) => {
+            const isRaw = f.name.toLowerCase().endsWith('.dng') || f.name.toLowerCase().endsWith('.raw');
+            const isVideo = f.type.startsWith('video/') || f.name.toLowerCase().endsWith('.mov') || f.name.toLowerCase().endsWith('.mp4');
+            const cat = isRaw ? 'raw' : (isVideo ? 'video' : 'photo');
+            const sizeMB = Number((f.size / (1024 * 1024)).toFixed(1));
+            const isImg = f.type.startsWith('image/');
+            const url = isImg ? URL.createObjectURL(f) : '';
+
+            app.items.push({
+              id: 'rf_' + Date.now() + '_' + idx,
+              file: f,
+              title: f.name.replace(/\\.[^/.]+$/, ""),
+              name: f.name,
+              category: cat,
+              sizeMB: sizeMB || 0.1,
+              dateLabel: dateLabel,
+              capturedAt: `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${timeStr}`,
+              synced: false,
+              selected: true,
+              progress: 0,
+              url: url,
+              err: false,
+              errMessage: ''
+            });
+          });
+
+          picker.value = '';
+          switchIosTab('queue');
+          renderAll();
+        });
+      }
+    });
+
+    async function uploadRealItem(item, sid) {
+      let attempts = 0;
+      while (attempts < 3) {
+        try {
+          await new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.withCredentials = true;
+            const url = `${BASE}/upload?batch=${BATCH}&name=${encodeURIComponent(item.name)}&sid=${encodeURIComponent(sid)}`;
+
+            xhr.upload.onprogress = (e) => {
+              if (e.lengthComputable && e.total > 0) {
+                const pct = Math.min(99, Math.round((e.loaded / e.total) * 100));
+                item.progress = pct;
+                const fill = document.getElementById(`prog-fill-${item.id}`);
+                const pctEl = document.getElementById(`prog-pct-${item.id}`);
+                if (fill) fill.style.width = pct + '%';
+                if (pctEl) pctEl.textContent = pct + '%';
+              }
+            };
+
+            xhr.onload = () => {
+              if (xhr.status >= 200 && xhr.status < 300) {
+                try {
+                  const res = JSON.parse(xhr.responseText || '{}');
+                  if (res.sid) {
+                    window._pd_sid = res.sid;
+                    try { sessionStorage.setItem('pd_sid', res.sid); } catch (_) {}
+                  }
+                } catch (_) {}
+                resolve();
+              } else {
+                let msg = `HTTP ${xhr.status}`;
+                try {
+                  const res = JSON.parse(xhr.responseText || '{}');
+                  if (res.error) msg = res.error;
+                } catch (_) {}
+                reject(new Error(msg));
+              }
+            };
+
+            xhr.onerror = () => reject(new Error('Connection dropped. Check Wi-Fi.'));
+            xhr.ontimeout = () => reject(new Error('Upload timeout.'));
+            xhr.timeout = 180000;
+
+            xhr.open('POST', url);
+            if (sid) {
+              try { xhr.setRequestHeader('X-PD-Session', sid); } catch (_) {}
+            }
+            xhr.send(item.file);
+          });
+          return; // Success!
+        } catch (err) {
+          attempts++;
+          if (attempts >= 3) throw err;
+          await new Promise(r => setTimeout(r, 1000 * attempts));
+        }
+      }
+    }
+
+    async function pollServerStatus() {
+      try {
+        const res = await fetch(`${BASE}/status?batch=${BATCH}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.usable !== undefined) {
+            app.freeGB = Number((data.usable / (1024**3)).toFixed(1));
+            const pill = document.getElementById('sam-pill-free');
+            const freePill = document.getElementById('sam-free-pill');
+            const hdr = document.getElementById('ios-header-status');
+            if (pill) pill.textContent = `${app.freeGB.toFixed(0)} GB Free`;
+            if (freePill) freePill.textContent = `${app.freeGB.toFixed(1)} GB Free`;
+            if (hdr) hdr.textContent = `Samsung S24 • ${app.freeGB.toFixed(0)} GB Free`;
+          }
+          if (data.sid && !window._pd_sid) {
+            window._pd_sid = data.sid;
+            try { sessionStorage.setItem('pd_sid', data.sid); } catch (_) {}
+          }
+        }
+      } catch (_) {}
+    }
+
+    function stopSyncTimer() {
+      app.isSyncing = false;
+      if (app.syncInterval) {
+        clearInterval(app.syncInterval);
+        app.syncInterval = null;
+      }
+    }
+
+    async function startRealtimeSyncLoop(selectedOnly = false) {
+      if (app.syncInterval) clearInterval(app.syncInterval);
+
+      // Acquire wake lock if supported
+      let wakeLock = null;
+      try {
+        if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen');
+      } catch (_) {}
+
+      let sid = window._pd_sid || "";
+      if (!sid) {
+        try { sid = sessionStorage.getItem("pd_sid") || ""; } catch (_) {}
+      }
+
+      const queuePool = app.items.filter(i => !i.synced && (!selectedOnly || i.selected));
+      if (queuePool[0] && !queuePool[0].file) queuePool[0].progress = 65;
+      if (queuePool[1] && !queuePool[1].file) queuePool[1].progress = 35;
+      renderAll();
+
+      while (app.isSyncing) {
+        const remaining = app.items.filter(i => !i.synced && (!selectedOnly || i.selected));
+        if (remaining.length === 0) {
+          stopSyncTimer();
+          renderAll();
+          break;
+        }
+
+        const current = remaining[0];
+        if (current.file) {
+          try {
+            await uploadRealItem(current, sid);
+            current.progress = 100;
+            current.synced = true;
+            current.selected = false;
+            current.err = false;
+            if (current.url && current.url.startsWith('blob:')) {
+              URL.revokeObjectURL(current.url);
+            }
+            const gbDelta = current.sizeMB / 1024;
+            app.freeGB = Number(Math.max(0, app.freeGB - gbDelta).toFixed(2));
+            if (current.category === 'video') app.videosGB = Number((app.videosGB + gbDelta).toFixed(2));
+            else if (current.category === 'raw') app.rawGB = Number((app.rawGB + gbDelta).toFixed(2));
+            else app.photosGB = Number((app.photosGB + gbDelta).toFixed(2));
+          } catch (err) {
+            current.err = true;
+            current.errMessage = err.message || 'Failed';
+            // Stop and let user retry or continue
+            stopSyncTimer();
+            renderAll();
+            break;
+          }
+        } else {
+          // Demo item simulation step
+          current.progress = Math.min(100, (current.progress || 0) + 50);
+          if (current.progress >= 100) {
+            current.synced = true;
+            current.selected = false;
+            const gbDelta = current.sizeMB / 1024;
+            app.freeGB = Number(Math.max(0, app.freeGB - gbDelta).toFixed(2));
+            if (current.category === 'video') app.videosGB = Number((app.videosGB + gbDelta).toFixed(2));
+            else if (current.category === 'raw') app.rawGB = Number((app.rawGB + gbDelta).toFixed(2));
+            else app.photosGB = Number((app.photosGB + gbDelta).toFixed(2));
+          }
+          await new Promise(r => setTimeout(r, 280));
+        }
+
+        renderAll();
+        pollServerStatus();
+      }
+
+      if (wakeLock) {
+        try { await wakeLock.release(); } catch (_) {}
+      }
+    }
+
+    // --- Simulate Taking a New Photo on iPhone 17 Pro ---
+    function simulateNewCapture() {
+      const num = app.nextCaptureId++;
+      const now = new Date();
+      const pad = n => String(n).padStart(2, '0');
+      const timeStr = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+      const sampleImgs = [
+        'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=400&q=80',
+        'https://images.unsplash.com/photo-1501785888041-af3ef285b470?auto=format&fit=crop&w=400&q=80',
+        'https://images.unsplash.com/photo-1519681393784-d120267933ba?auto=format&fit=crop&w=400&q=80'
+      ];
+      app.items.push({
+        id: 'm_' + num,
+        title: `iPhone Capture #${num - 4800}`,
+        name: `IMG_${num}.HEIC`,
+        category: 'photo',
+        sizeMB: 3.6,
+        dateLabel: `Nov 9 • ${pad(now.getHours())}:${pad(now.getMinutes())}`,
+        capturedAt: `2026-11-09 ${timeStr}`,
+        synced: false,
+        selected: true,
+        progress: 0,
+        url: sampleImgs[num % sampleImgs.length]
+      });
+      renderAll();
+    }
+
+    // --- Reset Demo to 14 Unsynced Items ---
+    function resetDemoState() {
+      stopSyncTimer();
+      app.items = JSON.parse(JSON.stringify(INITIAL_ITEMS));
+      app.freeGB = 142.4;
+      app.photosGB = 60.5;
+      app.videosGB = 10.5;
+      app.rawGB = 8.4;
+      app.serverOnline = true;
+      renderAll();
+    }
+
+    // --- Render iPhone Screen 1: Home ---
+    function renderIosHome(stats) {
+      document.getElementById('ios-watermark-pill').textContent = `Watermark: ${stats.watermark.slice(5)}`;
+      document.getElementById('bubble-photos-sub').textContent = stats.newPhotos > 0 ? `${stats.newPhotos} New` : 'Synced';
+      document.getElementById('bubble-videos-sub').textContent = stats.newVideos > 0 ? `${stats.newVideos} New` : 'Synced';
+      document.getElementById('bubble-raw-sub').textContent = stats.newRaw > 0 ? `${stats.newRaw} New` : 'Synced';
+      document.getElementById('bubble-synced-sub').textContent = stats.totalSynced.toLocaleString();
+
+      const connector = document.getElementById('ios-connector-pill');
+      const heroTitle = document.getElementById('ios-hero-title');
+      const heroDesc = document.getElementById('ios-hero-desc');
+      const heroCtaText = document.getElementById('ios-hero-cta-text');
+      const heroSpeed = document.getElementById('ios-hero-speed');
+      const bellDot = document.getElementById('ios-bell-dot');
+      const islandText = document.getElementById('ios-island-text');
+
+      if (!app.serverOnline) {
+        connector.textContent = 'Samsung S24 Offline • Check Tunnel';
+        heroTitle.textContent = 'Samsung Server Paused';
+        heroDesc.textContent = 'Tap below to wake the Samsung receiver daemon and resume catch-up.';
+        heroCtaText.textContent = 'Wake & Sync Now';
+        heroSpeed.classList.add('hidden');
+        islandText.textContent = 'WAIT';
+        return;
+      }
+
+      if (app.isSyncing) {
+        connector.textContent = `Pushing ${stats.unsyncedCount} Left • ${stats.deltaMB} MB`;
+        heroTitle.textContent = `Backing Up (${stats.unsyncedCount} Left)...`;
+        heroDesc.textContent = `Streaming directly to Samsung S24 Ultra over local WireGuard tunnel.`;
+        heroCtaText.textContent = 'Pause 1-Tap Transfer';
+        heroSpeed.classList.remove('hidden');
+        bellDot.classList.remove('hidden');
+        islandText.textContent = `${stats.unsyncedCount} UP`;
+      } else if (stats.unsyncedCount === 0) {
+        connector.textContent = `0 Unsynced • All ${stats.totalSynced.toLocaleString()} Backed Up`;
+        heroTitle.textContent = 'All Caught Up!';
+        heroDesc.textContent = `Every photo & video up to ${stats.watermark.slice(11)} is safely stored on Samsung.`;
+        heroCtaText.textContent = 'Verified on Samsung';
+        heroSpeed.classList.add('hidden');
+        bellDot.classList.add('hidden');
+        islandText.textContent = 'DONE';
+      } else {
+        connector.textContent = `${stats.unsyncedCount} Unsynced Items • ${stats.deltaMB} MB Delta`;
+        heroTitle.textContent = `${stats.unsyncedCount} New Photos Waiting`;
+        heroDesc.textContent = `Captured after your last Samsung backup (${stats.watermark.slice(5, 16)}).`;
+        heroCtaText.textContent = `Back Up ${stats.unsyncedCount} Items Now`;
+        heroSpeed.classList.add('hidden');
+        bellDot.classList.remove('hidden');
+        islandText.textContent = `${stats.unsyncedCount} NEW`;
+      }
+    }
+
+    // --- Render iPhone Screen 2: Photos Grid (Mode B Selective Picker) ---
+    function renderIosPhotosScreen() {
+      const stats = getDeltaStats();
+      const btnUnsynced = document.getElementById('seg-btn-unsynced');
+      const btnAll = document.getElementById('seg-btn-all');
+
+      btnUnsynced.textContent = `Unsynced (${stats.unsyncedCount})`;
+      btnAll.textContent = `All Library (${app.items.length})`;
+
+      if (app.photoFilter === 'unsynced') {
+        btnUnsynced.className = 'py-2.5 rounded-full text-xs font-bold bg-electric text-white shadow-xs transition-all tabular-nums';
+        btnAll.className = 'py-2.5 rounded-full text-xs font-bold bg-white text-zinc-700 hover:bg-zinc-100 transition-all tabular-nums';
+      } else {
+        btnAll.className = 'py-2.5 rounded-full text-xs font-bold bg-electric text-white shadow-xs transition-all tabular-nums';
+        btnUnsynced.className = 'py-2.5 rounded-full text-xs font-bold bg-white text-zinc-700 hover:bg-zinc-100 transition-all tabular-nums';
+      }
+
+      const list = app.photoFilter === 'unsynced'
+        ? app.items.filter(i => !i.synced)
+        : app.items.slice().reverse();
+
+      const grid = document.getElementById('ios-photo-grid');
+      if (list.length === 0) {
+        grid.innerHTML = `
+          <div class="col-span-2 bg-white rounded-[24px] p-6 text-center shadow-soft">
+            <div class="w-10 h-10 rounded-full bg-emerald-100 text-emerald-700 mx-auto flex items-center justify-center mb-2">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5"/></svg>
+            </div>
+            <div class="text-xs font-extrabold text-zinc-900">Zero Unsynced Photos</div>
+            <p class="text-[11px] text-zinc-500 mt-0.5">Switch to "All Library" or capture a new photo above.</p>
+          </div>
+        `;
+      } else {
+        grid.innerHTML = list.slice(0, 8).map(item => {
+          const isSelected = item.selected && !item.synced;
+          return `
+            <div onclick="togglePhotoSelect('${item.id}')"
+              class="group cursor-pointer">
+              <div class="relative aspect-square rounded-[22px] overflow-hidden bg-zinc-200 shadow-xs border-2 transition-all ${
+                isSelected ? 'border-electric scale-[0.98]' : 'border-transparent'
+              } ${item.synced ? 'opacity-65' : ''}">
+                <img src="${item.url}" alt="${item.title}" loading="lazy" class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+                
+                <!-- Top-Right Frosted Pill Badge (Matches "360" / "50" in Reference) -->
+                <div class="absolute top-2.5 right-2.5">
+                  ${item.synced ? `
+                    <span class="px-2.5 py-0.5 rounded-full bg-emerald-500/90 backdrop-blur-xs text-white text-[10px] font-bold shadow-xs">
+                      Synced ✓
+                    </span>
+                  ` : `
+                    <span class="px-2.5 py-0.5 rounded-full ${
+                      isSelected ? 'bg-electric text-white' : 'bg-white/85 text-zinc-900'
+                    } backdrop-blur-xs text-[10px] font-extrabold tabular-nums shadow-xs">
+                      ${isSelected ? 'Selected' : `${item.sizeMB}M`}
+                    </span>
+                  `}
+                </div>
+              </div>
+              <div class="mt-1.5 px-1">
+                <div class="text-xs font-extrabold text-zinc-900 truncate">${item.title}</div>
+                <div class="text-[10px] font-medium text-zinc-500 tabular-nums">${item.dateLabel}</div>
+              </div>
+            </div>
+          `;
+        }).join('');
+      }
+
+      const selectedItems = app.items.filter(i => !i.synced && i.selected);
+      const selMB = selectedItems.reduce((s, i) => s + i.sizeMB, 0).toFixed(1);
+      const btn = document.getElementById('ios-sync-selected-btn');
+      const label = document.getElementById('ios-sync-selected-label');
+      const mbSpan = document.getElementById('ios-sync-selected-mb');
+
+      if (selectedItems.length === 0) {
+        btn.className = 'w-full py-3.5 px-5 rounded-full bg-zinc-200 text-zinc-500 text-xs font-bold flex items-center justify-between cursor-not-allowed';
+        label.textContent = 'Tap Photos Above to Select';
+        mbSpan.textContent = '0 MB';
+      } else {
+        btn.className = 'w-full py-3.5 px-5 rounded-full bg-electric hover:bg-blue-700 active:scale-[0.99] text-white text-xs font-extrabold shadow-md flex items-center justify-between transition-all';
+        label.textContent = `Push ${selectedItems.length} Selected Photo${selectedItems.length === 1 ? '' : 's'}`;
+        mbSpan.textContent = `${selMB} MB →`;
+      }
+    }
+
+    // --- Render iPhone Screen 3: File Upload Progress Queue (Matches Bottom-Center Reference) ---
+    function renderIosQueueScreen(stats) {
+      const container = document.getElementById('ios-upload-queue-list');
+      const badge = document.getElementById('ios-queue-count-badge');
+      const statusLabel = document.getElementById('ios-queue-status-label');
+
+      badge.textContent = stats.unsyncedCount > 0 ? `${stats.unsyncedCount} remaining` : 'All Complete';
+      statusLabel.textContent = app.isSyncing ? 'In Progress' : (stats.unsyncedCount > 0 ? 'Pending Queue' : 'Completed');
+
+      const displayItems = stats.unsynced.length > 0
+        ? stats.unsynced.slice(0, 6)
+        : stats.synced.slice(-5).reverse();
+
+      const pastelPalette = [
+        { bg: 'bg-[#FFF1B8]', text: 'text-amber-800' },
+        { bg: 'bg-[#DECFFF]', text: 'text-purple-800' },
+        { bg: 'bg-[#DCEBFF]', text: 'text-electric' },
+        { bg: 'bg-[#DFF2E6]', text: 'text-emerald-800' }
+      ];
+
+      container.innerHTML = displayItems.map((item, idx) => {
+        const tone = pastelPalette[idx % pastelPalette.length];
+        const pct = item.synced ? 100 : (item.progress || (idx === 0 && app.isSyncing ? 80 : idx === 1 && app.isSyncing ? 45 : 0));
+
+        return `
+          <div class="bg-white rounded-2xl p-3 flex items-center justify-between gap-2 shadow-soft">
+            <div class="flex items-center gap-3 min-w-0">
+              <div class="w-10 h-10 rounded-xl ${tone.bg} ${tone.text} flex items-center justify-center flex-shrink-0 font-mono text-[10px] font-extrabold">
+                ${item.category.toUpperCase()}
+              </div>
+              <div class="min-w-0">
+                <div class="text-xs font-extrabold text-zinc-900 truncate">${item.name}</div>
+                <div class="text-[10px] font-medium text-zinc-400 tabular-nums">
+                  ${item.synced ? 'Saved to Samsung S24' : `${item.sizeMB} MB • ${app.isSyncing ? '2 Secs Left' : 'Waiting'}`}
+                </div>
+              </div>
+            </div>
+
+            <!-- Compact Black Pill Progress Bar + Bold Percentage + Action Circles -->
+            <div class="flex items-center gap-2 flex-shrink-0">
+              <div class="w-10 h-2 rounded-full bg-zinc-200 overflow-hidden">
+                <div class="h-full bg-pillnav rounded-full transition-all duration-200" id="prog-fill-${item.id}" style="width: ${pct}%"></div>
+              </div>
+              <span id="prog-pct-${item.id}" class="text-xs font-extrabold text-zinc-900 tabular-nums w-8 text-right">${pct}%</span>
+              ${!item.synced ? `
+                <button type="button" onclick="syncSingleItemNow('${item.id}')"
+                  title="Upload Immediately"
+                  class="w-7 h-7 rounded-full bg-electric text-white flex items-center justify-center hover:bg-blue-700">
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.3" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/></svg>
+                </button>
+              ` : `
+                <span class="w-7 h-7 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center">
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5"/></svg>
+                </span>
+              `}
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function syncSingleItemNow(id) {
+      const item = app.items.find(i => i.id === id);
+      if (!item || item.synced) return;
+      item.synced = true;
+      item.progress = 100;
+      item.selected = false;
+      app.freeGB = Number((app.freeGB - item.sizeMB / 1024).toFixed(2));
+      app.photosGB = Number((app.photosGB + item.sizeMB / 1024).toFixed(2));
+      renderAll();
+    }
+
+    // --- Render Samsung APK Screens ---
+    function renderSamsungScreens(stats) {
+      const dot = document.getElementById('sam-daemon-dot');
+      const badge = document.getElementById('sam-http-badge');
+      const toggleBtn = document.getElementById('sam-server-toggle-btn');
+
+      if (app.serverOnline) {
+        dot.className = 'w-2.5 h-2.5 rounded-full bg-emerald-500 flex-shrink-0';
+        badge.textContent = app.isSyncing ? '201 WRITING' : '200 OK';
+        badge.className = 'text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800';
+        toggleBtn.className = 'w-10 h-10 rounded-full bg-white border border-zinc-200/80 flex items-center justify-center text-emerald-600 hover:bg-zinc-50 transition-colors';
+      } else {
+        dot.className = 'w-2.5 h-2.5 rounded-full bg-rose-500 flex-shrink-0';
+        badge.textContent = 'OFFLINE';
+        badge.className = 'text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-rose-100 text-rose-700';
+        toggleBtn.className = 'w-10 h-10 rounded-full bg-rose-50 border border-rose-200 flex items-center justify-center text-rose-600';
+      }
+
+      // Update Pills & Folder Meta
+      document.getElementById('sam-pill-count').textContent = `${stats.totalSynced.toLocaleString()} In`;
+      document.getElementById('sam-pill-free').textContent = `${app.freeGB.toFixed(0)} GB Free`;
+      document.getElementById('sam-folder-photos-meta').textContent = `${app.photosGB.toFixed(1)} GB • ${(stats.totalSynced - 296).toLocaleString()} HEIC`;
+      document.getElementById('sam-folder-videos-meta').textContent = `${app.videosGB.toFixed(1)} GB • 214 MOV`;
+      document.getElementById('sam-folder-raw-meta').textContent = `${app.rawGB.toFixed(1)} GB • 82 DNG`;
+      document.getElementById('sam-folder-ledger-meta').textContent = `Watermark: ${stats.watermark.slice(5, 16)}`;
+
+      // Update Stream Screen
+      document.getElementById('sam-stream-watermark').textContent = stats.watermark;
+      document.getElementById('sam-stream-total').textContent = `${stats.totalSynced.toLocaleString()} items`;
+      const livePill = document.getElementById('sam-stream-live-pill');
+      livePill.textContent = app.isSyncing ? 'Receiving...' : 'Listening';
+      livePill.className = app.isSyncing
+        ? 'px-2.5 py-1 rounded-full bg-electric text-white text-[10px] font-extrabold uppercase animate-pulse'
+        : 'px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-extrabold uppercase';
+
+      const recentSynced = stats.synced.slice(-5).reverse();
+      const streamContainer = document.getElementById('sam-incoming-list');
+      streamContainer.innerHTML = recentSynced.map(item => `
+        <div class="bg-white rounded-2xl p-3 flex items-center justify-between shadow-soft">
+          <div class="flex items-center gap-3 min-w-0">
+            <img src="${item.url}" alt="${item.name}" class="w-10 h-10 rounded-xl object-cover flex-shrink-0" />
+            <div class="min-w-0">
+              <div class="text-xs font-extrabold text-zinc-900 truncate">${item.name}</div>
+              <div class="text-[10px] font-mono text-zinc-500 tabular-nums">Captured ${item.capturedAt.slice(5)}</div>
+            </div>
+          </div>
+          <div class="text-right flex-shrink-0">
+            <span class="px-2 py-0.5 rounded-full bg-[#DFF2E6] text-emerald-800 text-[10px] font-extrabold tabular-nums">
+              +${item.sizeMB} MB
+            </span>
+          </div>
+        </div>
+      `).join('');
+
+      // Update Settings JSON Preview
+      document.getElementById('sam-free-pill').textContent = `${app.freeGB.toFixed(1)} GB Free`;
+      document.getElementById('sam-json-watermark').textContent = `"latest_captured_at": "${stats.watermark}",`;
+      document.getElementById('sam-json-count').textContent = `"backed_up_assets": ${stats.totalSynced},`;
+      document.getElementById('sam-json-free').textContent = `"free_space_gb": ${app.freeGB.toFixed(1)}`;
+    }
+
+    function renderAll() {
+      const stats = getDeltaStats();
+      renderIosHome(stats);
+      renderIosPhotosScreen();
+      renderIosQueueScreen(stats);
+      renderSamsungScreens(stats);
+    }
+
+    window.onload = function () {
+      if (window.innerWidth < 1024) {
+        setViewportMode('iphone');
+      }
+      renderAll();
+      pollServerStatus();
+    };
+  </script>
+</body>
+</html>"""
 
 PAGE_DONE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
