@@ -2,17 +2,20 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="theme-color" content="#ECEEF0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="theme-color" content="#ECEEF0" />
+  <meta name="description" content="Ultra-fast zero-compression direct photo sync from iPhone to Samsung Galaxy." />
 
   <title>Photo Drop — Sync to Samsung Galaxy</title>
+
   <!-- Google Fonts: Plus Jakarta Sans & JetBrains Mono -->
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <!-- Tailwind CSS -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+
+  <!-- Tailwind CSS CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
     tailwind.config = {
@@ -26,49 +29,93 @@
             board: '#ECEEF0',
             appbg: '#F5F6F7',
             electric: '#1E50FF',
-            lavender: { card: '#DECFFF', deep: '#CBB5FF' },
-            butter: { card: '#FFF1B8', deep: '#FBE38E' },
-            mint: { card: '#DFF2E6', deep: '#C5E8D2' },
+            lavender: {
+              card: '#DECFFF',
+              deep: '#CBB5FF'
+            },
+            butter: {
+              card: '#FFF1B8',
+              deep: '#FBE38E'
+            },
+            mint: {
+              card: '#DFF2E6',
+              deep: '#C5E8D2'
+            },
             pillnav: '#141519'
           },
           boxShadow: {
             'soft': '0 4px 20px -2px rgba(20, 21, 25, 0.05)',
-            'pill': '0 10px 25px -4px rgba(20, 21, 25, 0.28)',
-            'float': '0 4px 12px rgba(20, 21, 25, 0.08)'
+            'card': '0 6px 24px -4px rgba(20, 21, 25, 0.07)',
+            'pill': '0 12px 30px -4px rgba(20, 21, 25, 0.32)',
+            'float': '0 4px 14px rgba(20, 21, 25, 0.08)',
+            'electric': '0 6px 20px rgba(30, 80, 255, 0.35)'
           }
         }
       }
-    }
+    };
   </script>
+
   <style>
+    /* iOS Safari mobile optimization */
+    html, body {
+      -webkit-tap-highlight-color: transparent;
+      touch-action: manipulation;
+    }
     .tabular-nums { font-variant-numeric: tabular-nums; }
     .no-scrollbar::-webkit-scrollbar { display: none; }
     .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    @keyframes pulse-subtle {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.75; transform: scale(0.97); }
+    }
+    .animate-pulse-subtle {
+      animation: pulse-subtle 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+    }
   </style>
 </head>
-<body class="bg-board text-zinc-900 font-sans antialiased min-h-screen selection:bg-electric selection:text-white pb-24">
-  <input type="file" id="real-file-picker" multiple accept="image/*,video/*" style="display:none;" />
+<body class="bg-appbg text-zinc-900 font-sans antialiased min-h-screen selection:bg-electric selection:text-white pb-32">
+  <!-- Hidden Native File Picker for 500+ items -->
+  <input type="file" id="real-file-picker" multiple accept="image/*,video/*" class="hidden" />
 
-  <!-- Main Responsive Container (Full screen on mobile, elegant max-w-md on desktop) -->
-  <div class="w-full max-w-md mx-auto px-4 pt-4 sm:pt-6 flex flex-col gap-4">
+  <!-- Full-Screen Native Mobile Safari Container (Max-w-md centered for tablets/desktop) -->
+  <div class="w-full max-w-md mx-auto px-4 pt-[max(12px,env(safe-area-inset-top,0px))] flex flex-col gap-4">
 
-    <!-- Top Pairing Bar & Connection Status -->
+    <!-- 1. TOP BAR: Peer Pairing Indicator + Queue Shortcut -->
     <header class="flex items-center justify-between pt-1">
       <div class="flex items-center gap-3">
-        <div class="w-11 h-11 rounded-2xl bg-gradient-to-br from-[#1E50FF] to-[#1038CC] text-white shadow-xs flex items-center justify-center font-extrabold text-sm tracking-tight">
+        <!-- Peer Avatar Badge -->
+        <div class="w-11 h-11 rounded-2xl bg-gradient-to-br from-[#1E50FF] to-[#1038CC] text-white shadow-soft flex items-center justify-center font-extrabold text-sm tracking-tight">
           PD
         </div>
         <div>
+          <!-- Peer Pairing Indicator: iPhone → Samsung Galaxy -->
           <div class="text-xs font-extrabold text-zinc-900 tracking-tight flex items-center gap-1.5">
-            <span>iPhone</span>
-            <span class="text-zinc-400 font-normal">&rarr;</span>
-            <span>Samsung Galaxy</span>
+            <span class="inline-flex items-center gap-1">
+              <svg class="w-3.5 h-3.5 text-zinc-600 inline" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                <rect x="5" y="2" width="14" height="20" rx="3" ry="3"></rect>
+                <line x1="12" y1="18" x2="12.01" y2="18" stroke-width="2.5"></line>
+              </svg>
+              iPhone
+            </span>
+            <span class="text-zinc-400 font-bold">&rarr;</span>
+            <span class="inline-flex items-center gap-1 text-zinc-900">
+              <svg class="w-3.5 h-3.5 text-zinc-600 inline" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                <rect x="5" y="2" width="14" height="20" rx="3" ry="3"></rect>
+                <circle cx="12" cy="5" r="0.75" fill="currentColor"></circle>
+              </svg>
+              Samsung Galaxy
+            </span>
           </div>
-          <div id="ios-header-status" class="text-[11px] font-medium text-zinc-500 tabular-nums">Ready &bull; 105 GB Free</div>
+          <!-- Storage & Connection Status -->
+          <div id="ios-header-status" class="text-[11px] font-medium text-zinc-500 tabular-nums">
+            Ready &bull; 105 GB Free
+          </div>
         </div>
       </div>
+
+      <!-- Queue Shortcut Icon Button -->
       <button type="button" onclick="hapticTap(); switchIosTab('queue')" aria-label="Open Upload Queue"
-        class="w-11 h-11 rounded-2xl bg-white border border-zinc-200/80 flex items-center justify-center text-zinc-700 hover:bg-zinc-100 active:scale-95 transition-all relative shadow-xs">
+        class="w-11 h-11 rounded-2xl bg-white border border-zinc-200/80 flex items-center justify-center text-zinc-700 hover:bg-zinc-50 active:scale-95 transition-all relative shadow-soft">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0" />
         </svg>
@@ -76,20 +123,23 @@
       </button>
     </header>
 
-    <!-- Editorial Bold Title -->
-    <h1 class="text-[26px] font-extrabold tracking-tight text-zinc-900 leading-tight">
-      Sync With Samsung
-    </h1>
+    <!-- 2. BOLD TYPOGRAPHY: Editorial Title -->
+    <div class="pt-0.5">
+      <h1 class="text-[28px] font-extrabold tracking-tight text-zinc-900 leading-tight">
+        Sync With Samsung
+      </h1>
+      <p class="text-xs font-medium text-zinc-500 mt-0.5">Original quality direct streaming &bull; DCIM/PhotoDrop</p>
+    </div>
 
-    <!-- Direct Wi-Fi / Tunnel Status Bar -->
-    <div class="bg-white rounded-full px-4 py-3 flex items-center justify-between shadow-soft">
+    <!-- 3. STATUS PILL: Connection Status & Network Mode -->
+    <div class="bg-white rounded-full px-4 py-2.5 flex items-center justify-between shadow-soft border border-zinc-100">
       <div class="flex items-center gap-2.5 min-w-0">
         <span id="ios-tunnel-dot" class="w-2.5 h-2.5 rounded-full bg-emerald-500 flex-shrink-0 animate-pulse"></span>
-        <span id="ios-watermark-pill" class="text-xs font-medium text-zinc-600 truncate tabular-nums">
+        <span id="ios-watermark-pill" class="text-xs font-semibold text-zinc-700 truncate tabular-nums">
           Live Connection &bull; Ready
         </span>
       </div>
-      <button type="button" onclick="hapticTap(); switchIosTab('photos')" class="text-zinc-700 hover:text-electric transition-colors p-1" title="Filter Unsynced Photos">
+      <button type="button" onclick="hapticTap(); switchIosTab('photos')" class="text-zinc-600 hover:text-electric transition-colors p-1" title="Filter Unsynced Photos">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 6h9.75M10.5 6a1.5 1.5 0 11-3 0m3 0a1.5 1.5 0 10-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-9.75 0h9.75" />
         </svg>
@@ -97,16 +147,19 @@
     </div>
 
     <!-- ================================================================= -->
-    <!-- SCREEN 1: HOME (Delta + Butter Card + Chips + Dropzone)            -->
+    <!-- SCREEN 1: HOME (Delta Card + Butter Card + Chips + Dropzone)       -->
     <!-- ================================================================= -->
     <main id="ios-screen-home" class="space-y-4">
 
-      <!-- LAVENDER FEATURE CARD: Unbacked Delta & Library -->
+      <!-- 4. LAVENDER DELTA CARD: 4 Circular Icon Bubbles + Floating Connector Pill -->
       <div class="relative pb-3">
-        <div class="bg-lavender-card rounded-[26px] p-4 shadow-soft">
-          <div class="flex items-center justify-between mb-3.5">
-            <span class="text-xs font-extrabold text-zinc-900">Unbacked Delta &amp; Library</span>
-            <button type="button" onclick="switchIosTab('photos')" class="text-zinc-700 hover:text-zinc-900">
+        <div class="bg-lavender-card rounded-[28px] p-4.5 shadow-card border border-[#DECFFF]">
+          <div class="flex items-center justify-between mb-3.5 px-0.5">
+            <div class="flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-purple-600"></span>
+              <span class="text-xs font-extrabold text-zinc-900 tracking-tight">Unbacked Delta &amp; Library</span>
+            </div>
+            <button type="button" onclick="switchIosTab('photos')" class="text-zinc-600 hover:text-zinc-900 p-1" aria-label="View Library">
               <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
               </svg>
@@ -116,10 +169,12 @@
           <!-- 4 Circular Icon Bubbles -->
           <div class="grid grid-cols-4 gap-2 text-center">
             <!-- Bubble 1: Photos -->
-            <button type="button" onclick="switchIosTab('photos')" class="flex flex-col items-center group">
-              <div class="w-12 h-12 rounded-full bg-white flex items-center justify-center shadow-xs group-hover:scale-105 transition-transform">
-                <span class="w-6 h-6 rounded-md bg-orange-100 text-orange-500 flex items-center justify-center">
-                  <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm12 12H4l4-8 3 6 2-4 3 6z" clip-rule="evenodd"/></svg>
+            <button type="button" onclick="hapticTap(); switchIosTab('photos')" class="flex flex-col items-center group">
+              <div class="w-13 h-13 min-w-[50px] min-h-[50px] rounded-full bg-white flex items-center justify-center shadow-soft group-hover:scale-105 active:scale-95 transition-all">
+                <span class="w-7 h-7 rounded-full bg-[#FFEAE0] text-[#FF6B00] flex items-center justify-center">
+                  <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                    <path fill-rule="evenodd" d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm12 12H4l4-8 3 6 2-4 3 6z" clip-rule="evenodd" />
+                  </svg>
                 </span>
               </div>
               <span class="mt-2 text-[11px] font-bold text-zinc-900">Photos</span>
@@ -127,10 +182,12 @@
             </button>
 
             <!-- Bubble 2: Videos -->
-            <button type="button" onclick="switchIosTab('photos')" class="flex flex-col items-center group">
-              <div class="w-12 h-12 rounded-full bg-white flex items-center justify-center shadow-xs group-hover:scale-105 transition-transform">
-                <span class="w-6 h-6 rounded-md bg-blue-100 text-electric flex items-center justify-center">
-                  <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20"><path d="M2 6a2 2 0 012-2h6a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V6zM14.553 7.106A1 1 0 0014 8v4a1 1 0 00.553.894l2 1A1 1 0 0018 13V7a1 1 0 00-1.447-.894l-2 1z"/></svg>
+            <button type="button" onclick="hapticTap(); switchIosTab('photos')" class="flex flex-col items-center group">
+              <div class="w-13 h-13 min-w-[50px] min-h-[50px] rounded-full bg-white flex items-center justify-center shadow-soft group-hover:scale-105 active:scale-95 transition-all">
+                <span class="w-7 h-7 rounded-full bg-[#E0EBFF] text-electric flex items-center justify-center">
+                  <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                    <path d="M2 6a2 2 0 012-2h6a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V6zM14.553 7.106A1 1 0 0014 8v4a1 1 0 00.553.894l2 1A1 1 0 0018 13V7a1 1 0 00-1.447-.894l-2 1z" />
+                  </svg>
                 </span>
               </div>
               <span class="mt-2 text-[11px] font-bold text-zinc-900">Videos</span>
@@ -138,65 +195,68 @@
             </button>
 
             <!-- Bubble 3: ProRAW -->
-            <button type="button" onclick="switchIosTab('photos')" class="flex flex-col items-center group">
-              <div class="w-12 h-12 rounded-full bg-white flex items-center justify-center shadow-xs group-hover:scale-105 transition-transform">
-                <span class="w-6 h-6 rounded-md bg-rose-100 text-rose-500 flex items-center justify-center font-mono text-[9px] font-extrabold">RAW</span>
+            <button type="button" onclick="hapticTap(); switchIosTab('photos')" class="flex flex-col items-center group">
+              <div class="w-13 h-13 min-w-[50px] min-h-[50px] rounded-full bg-white flex items-center justify-center shadow-soft group-hover:scale-105 active:scale-95 transition-all">
+                <span class="w-7 h-7 rounded-full bg-[#FFE5EC] text-[#E01E5A] flex items-center justify-center font-mono text-[9px] font-extrabold tracking-tight">RAW</span>
               </div>
               <span class="mt-2 text-[11px] font-bold text-zinc-900">ProRAW</span>
               <span id="bubble-raw-sub" class="text-[10px] font-medium text-zinc-600 tabular-nums">0 New</span>
             </button>
 
-            <!-- Bubble 4: Already Synced -->
-            <button type="button" onclick="switchIosTab('photos')" class="flex flex-col items-center group">
-              <div class="w-12 h-12 rounded-full bg-white flex items-center justify-center shadow-xs group-hover:scale-105 transition-transform">
-                <span class="w-6 h-6 rounded-md bg-purple-100 text-purple-600 flex items-center justify-center">
-                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5"/></svg>
+            <!-- Bubble 4: Synced -->
+            <button type="button" onclick="hapticTap(); switchIosTab('photos')" class="flex flex-col items-center group">
+              <div class="w-13 h-13 min-w-[50px] min-h-[50px] rounded-full bg-white flex items-center justify-center shadow-soft group-hover:scale-105 active:scale-95 transition-all">
+                <span class="w-7 h-7 rounded-full bg-[#EFE4FF] text-purple-700 flex items-center justify-center">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                  </svg>
                 </span>
               </div>
               <span class="mt-2 text-[11px] font-bold text-zinc-900">Synced</span>
-              <span id="bubble-synced-sub" class="text-[10px] font-medium text-zinc-600 tabular-nums">1</span>
+              <span id="bubble-synced-sub" class="text-[10px] font-medium text-zinc-600 tabular-nums">0</span>
             </button>
           </div>
         </div>
 
         <!-- Floating Connector Pill -->
-        <div class="absolute -bottom-1.5 inset-x-0 flex justify-center">
-          <div id="ios-connector-pill" class="px-4 py-1 rounded-full bg-white shadow-float border border-zinc-100 text-[10px] font-bold text-zinc-700 tabular-nums">
+        <div class="absolute -bottom-1.5 inset-x-0 flex justify-center pointer-events-none">
+          <div id="ios-connector-pill" class="px-4 py-1.5 rounded-full bg-white shadow-float border border-zinc-100 text-[10px] font-extrabold text-zinc-700 tabular-nums pointer-events-auto">
             Ready to Sync &bull; Direct to Samsung
           </div>
         </div>
       </div>
 
-      <!-- WARM BUTTER YELLOW HERO CARD -->
-      <div class="bg-butter-card rounded-[26px] p-4 shadow-soft relative overflow-hidden">
-        <div class="w-20 h-20 rounded-full bg-white/50 absolute -top-6 -right-6 pointer-events-none"></div>
-        <div class="w-12 h-12 rounded-full bg-white/60 absolute top-6 right-8 pointer-events-none"></div>
+      <!-- 5. WARM BUTTER YELLOW HERO CARD: 1-Tap Catch-up Hero Card -->
+      <div class="bg-butter-card rounded-[28px] p-5 shadow-card relative overflow-hidden border border-[#FFF1B8]">
+        <!-- Subtle Ambient Design Elements -->
+        <div class="w-24 h-24 rounded-full bg-white/40 absolute -top-8 -right-8 pointer-events-none blur-xs"></div>
+        <div class="w-16 h-16 rounded-full bg-white/50 absolute top-8 right-8 pointer-events-none blur-xs"></div>
 
         <div class="relative z-10">
           <div class="flex items-center justify-between">
-            <span class="text-[10px] font-extrabold uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-white/80 text-zinc-800">
+            <span class="text-[10px] font-extrabold uppercase tracking-wider px-3 py-1 rounded-full bg-white/80 text-zinc-800 shadow-2xs">
               Mode A &bull; Auto Catch-Up
             </span>
-            <span id="ios-hero-speed" class="text-[11px] font-mono font-bold text-zinc-700 tabular-nums hidden">
+            <span id="ios-hero-speed" class="text-[11px] font-mono font-bold text-zinc-800 tabular-nums hidden bg-white/60 px-2 py-0.5 rounded-md">
               0.0 MB/s
             </span>
           </div>
 
-          <h3 id="ios-hero-title" class="mt-2.5 text-lg font-extrabold text-zinc-900 leading-snug">
+          <h2 id="ios-hero-title" class="mt-3 text-lg font-extrabold text-zinc-900 leading-snug">
             Add Photos to Back Up
-          </h3>
-          <p id="ios-hero-desc" class="mt-1 text-xs font-medium text-zinc-600 leading-relaxed max-w-[280px]">
+          </h2>
+          <p id="ios-hero-desc" class="mt-1 text-xs font-medium text-zinc-700 leading-relaxed max-w-[280px]">
             Pick photos, videos, or ProRAW from your iPhone to stream directly to Samsung Galaxy.
           </p>
 
-          <!-- Signature White Pill CTA Button with Black Circle Right Arrow -->
+          <!-- Signature White Pill CTA with Circle Right Arrow -->
           <button type="button" onclick="triggerOneTapSync()" id="ios-hero-cta"
             class="mt-4 w-full bg-white hover:bg-zinc-50 active:scale-[0.99] rounded-full pl-5 pr-2 py-2 flex items-center justify-between shadow-soft transition-all group">
             <span id="ios-hero-cta-text" class="text-xs font-extrabold text-zinc-900 tabular-nums">
               Select Photos &amp; Videos Now
             </span>
-            <span id="ios-hero-cta-icon" class="w-8 h-8 rounded-full bg-pillnav text-white flex items-center justify-center group-hover:translate-x-0.5 transition-transform">
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+            <span id="ios-hero-cta-icon" class="w-8 h-8 rounded-full bg-pillnav text-white flex items-center justify-center group-hover:translate-x-0.5 active:scale-95 transition-transform shadow-xs">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.3" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
               </svg>
             </span>
@@ -204,31 +264,42 @@
         </div>
       </div>
 
-      <!-- 3 Pastel Action Chips -->
-      <div class="grid grid-cols-3 gap-2 pt-0.5">
-        <button type="button" onclick="triggerOneTapSync()"
-          class="py-2.5 px-3 rounded-full bg-[#DFF2E6] hover:brightness-95 text-zinc-900 text-xs font-bold flex items-center justify-center gap-1.5 transition-all shadow-xs">
-          <svg class="w-3.5 h-3.5 text-emerald-700" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/></svg>
+      <!-- 6. THREE PASTEL ACTION CHIPS: 1-Tap, Select, Queue -->
+      <div class="grid grid-cols-3 gap-2.5 pt-0.5">
+        <!-- Mint Green Chip: 1-Tap -->
+        <button type="button" onclick="hapticTap(); triggerOneTapSync()"
+          class="py-2.5 px-3 rounded-full bg-mint-card hover:brightness-95 active:scale-95 text-zinc-900 text-xs font-extrabold flex items-center justify-center gap-1.5 transition-all shadow-soft border border-mint-deep/40">
+          <svg class="w-3.5 h-3.5 text-emerald-800" fill="none" stroke="currentColor" stroke-width="2.4" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+          </svg>
           <span>1-Tap</span>
         </button>
-        <button type="button" onclick="switchIosTab('photos')"
-          class="py-2.5 px-3 rounded-full bg-[#FADCE6] hover:brightness-95 text-zinc-900 text-xs font-bold flex items-center justify-center gap-1.5 transition-all shadow-xs">
-          <svg class="w-3.5 h-3.5 text-rose-700" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5"/></svg>
+
+        <!-- Pastel Rose/Lavender Chip: Select -->
+        <button type="button" onclick="hapticTap(); switchIosTab('photos')"
+          class="py-2.5 px-3 rounded-full bg-[#FCE5ED] hover:brightness-95 active:scale-95 text-zinc-900 text-xs font-extrabold flex items-center justify-center gap-1.5 transition-all shadow-soft border border-rose-200/50">
+          <svg class="w-3.5 h-3.5 text-rose-700" fill="none" stroke="currentColor" stroke-width="2.4" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+          </svg>
           <span>Select</span>
         </button>
-        <button type="button" onclick="switchIosTab('queue')"
-          class="py-2.5 px-3 rounded-full bg-[#DCEBFF] hover:brightness-95 text-zinc-900 text-xs font-bold flex items-center justify-center gap-1.5 transition-all shadow-xs">
-          <svg class="w-3.5 h-3.5 text-electric" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 12h16.5m-16.5 3.75h16.5M3.75 19.5h16.5M5.625 4.5h12.75a1.875 1.875 0 010 3.75H5.625a1.875 1.875 0 010-3.75z"/></svg>
+
+        <!-- Pastel Blue Chip: Queue -->
+        <button type="button" onclick="hapticTap(); switchIosTab('queue')"
+          class="py-2.5 px-3 rounded-full bg-[#DCEBFF] hover:brightness-95 active:scale-95 text-zinc-900 text-xs font-extrabold flex items-center justify-center gap-1.5 transition-all shadow-soft border border-blue-200/50">
+          <svg class="w-3.5 h-3.5 text-electric" fill="none" stroke="currentColor" stroke-width="2.4" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 12h16.5m-16.5 3.75h16.5M3.75 19.5h16.5M5.625 4.5h12.75a1.875 1.875 0 010 3.75H5.625a1.875 1.875 0 010-3.75z" />
+          </svg>
           <span>Queue</span>
         </button>
       </div>
 
-      <!-- Drag & Drop Zone -->
-      <div onclick="pickRealPhotos()"
-        class="border-2 border-dashed border-zinc-300 hover:border-electric bg-white/70 hover:bg-white rounded-[24px] p-6 text-center cursor-pointer transition-all shadow-soft group">
-        <div class="w-12 h-12 rounded-full bg-blue-50 text-electric mx-auto flex items-center justify-center mb-2.5 group-hover:scale-105 transition-transform">
-          <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/>
+      <!-- 7. DRAG & DROP ZONE + Native Photo Picker for 500+ items -->
+      <div onclick="hapticTap(); pickRealPhotos()"
+        class="border-2 border-dashed border-zinc-300 hover:border-electric bg-white/80 hover:bg-white rounded-[26px] p-6 text-center cursor-pointer transition-all shadow-soft group">
+        <div class="w-13 h-13 min-w-[52px] min-h-[52px] rounded-full bg-blue-50 text-electric mx-auto flex items-center justify-center mb-2.5 group-hover:scale-105 active:scale-95 transition-transform shadow-2xs">
+          <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
           </svg>
         </div>
         <div class="text-xs font-extrabold text-zinc-900">Drag photos here or tap to pick</div>
@@ -238,56 +309,60 @@
     </main>
 
     <!-- ================================================================= -->
-    <!-- SCREEN 2: SELECTIVE PHOTOS GRID                                   -->
+    <!-- SCREEN 2: 8. SELECTIVE PHOTOS GRID                                -->
     <!-- ================================================================= -->
     <section id="ios-screen-photos" class="hidden space-y-4">
       <div class="flex items-center justify-between pt-1">
-        <button type="button" onclick="switchIosTab('home')"
-          class="w-10 h-10 rounded-full bg-white border border-zinc-200/80 flex items-center justify-center text-zinc-800 hover:bg-zinc-100 shadow-xs">
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18"/></svg>
+        <button type="button" onclick="hapticTap(); switchIosTab('home')"
+          class="w-10 h-10 rounded-full bg-white border border-zinc-200/80 flex items-center justify-center text-zinc-800 hover:bg-zinc-50 active:scale-95 shadow-soft">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" />
+          </svg>
         </button>
         <h2 class="text-base font-extrabold text-zinc-900">Selective Sync</h2>
         <div class="flex items-center gap-1.5">
-          <button type="button" onclick="pickRealPhotos()"
-            class="px-3 h-9 rounded-full bg-electric text-white text-[11px] font-bold hover:bg-blue-700 flex items-center gap-1 shadow-xs">
+          <button type="button" onclick="hapticTap(); pickRealPhotos()"
+            class="px-3 h-9 rounded-full bg-electric text-white text-[11px] font-bold hover:bg-blue-700 active:scale-95 flex items-center gap-1 shadow-soft">
             <span>+ Add</span>
           </button>
-          <button type="button" onclick="toggleSelectAllUnsynced()" id="ios-select-all-btn"
-            class="px-3 h-9 rounded-full bg-white border border-zinc-200/80 text-[11px] font-bold text-electric hover:bg-zinc-50">
+          <button type="button" onclick="hapticTap(); toggleSelectAllUnsynced()" id="ios-select-all-btn"
+            class="px-3 h-9 rounded-full bg-white border border-zinc-200/80 text-[11px] font-bold text-electric hover:bg-zinc-50 active:scale-95 shadow-2xs">
             All New
           </button>
         </div>
       </div>
 
-      <!-- Search / Filter Bar -->
-      <div class="bg-white rounded-full px-4 py-2.5 flex items-center justify-between shadow-soft">
-        <div class="flex items-center gap-2 text-xs text-zinc-500">
-          <svg class="w-4 h-4 text-zinc-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"/></svg>
+      <!-- Search / Info Filter Bar -->
+      <div class="bg-white rounded-full px-4 py-2.5 flex items-center justify-between shadow-soft border border-zinc-100">
+        <div class="flex items-center gap-2 text-xs text-zinc-600">
+          <svg class="w-4 h-4 text-zinc-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+          </svg>
           <span id="ios-photo-filter-summary">Skipping files already on Samsung</span>
         </div>
-        <span class="text-[11px] font-mono font-bold text-emerald-600">SHA-256</span>
+        <span class="text-[10px] font-mono font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full">SHA-256</span>
       </div>
 
       <!-- Segmented Pill Toggle -->
       <div class="grid grid-cols-2 gap-2.5">
-        <button type="button" onclick="setPhotoFilter('unsynced')" id="seg-btn-unsynced"
-          class="py-2.5 rounded-full text-xs font-bold bg-electric text-white shadow-xs transition-all tabular-nums">
+        <button type="button" onclick="hapticTap(); setPhotoFilter('unsynced')" id="seg-btn-unsynced"
+          class="py-2.5 rounded-full text-xs font-extrabold bg-electric text-white shadow-soft transition-all tabular-nums">
           Unsynced (0)
         </button>
-        <button type="button" onclick="setPhotoFilter('all')" id="seg-btn-all"
-          class="py-2.5 rounded-full text-xs font-bold bg-white text-zinc-700 hover:bg-zinc-100 transition-all tabular-nums">
+        <button type="button" onclick="hapticTap(); setPhotoFilter('all')" id="seg-btn-all"
+          class="py-2.5 rounded-full text-xs font-extrabold bg-white text-zinc-700 hover:bg-zinc-50 transition-all tabular-nums border border-zinc-200/60">
           All Library (0)
         </button>
       </div>
 
-      <!-- 2-Column Rounded Photo Cards Grid -->
+      <!-- Clean 2-Column Photo Cards Grid -->
       <div id="ios-photo-grid" class="grid grid-cols-2 gap-3 pt-1">
-        <!-- Populated by JS -->
+        <!-- Populated dynamically by JS -->
       </div>
 
       <!-- Sticky Action Button When Items Selected -->
-      <div class="pt-1">
-        <button type="button" onclick="syncSelectedPhotos()" id="ios-sync-selected-btn"
+      <div class="pt-1 pb-4">
+        <button type="button" onclick="hapticTap(); syncSelectedPhotos()" id="ios-sync-selected-btn"
           class="w-full py-3.5 px-5 rounded-full bg-zinc-200 text-zinc-500 text-xs font-bold flex items-center justify-between cursor-not-allowed transition-all">
           <span id="ios-sync-selected-label" class="tabular-nums">Tap Photos Above to Select</span>
           <span id="ios-sync-selected-mb" class="font-mono text-[11px] opacity-90 tabular-nums">0 MB &rarr;</span>
@@ -296,53 +371,57 @@
     </section>
 
     <!-- ================================================================= -->
-    <!-- SCREEN 3: FILE UPLOAD QUEUE                                       -->
+    <!-- SCREEN 3: 9. QUEUE SCREEN                                         -->
     <!-- ================================================================= -->
     <section id="ios-screen-queue" class="hidden space-y-4">
       <div class="flex items-center justify-between pt-1">
-        <button type="button" onclick="switchIosTab('home')"
-          class="w-10 h-10 rounded-full bg-white border border-zinc-200/80 flex items-center justify-center text-zinc-800 hover:bg-zinc-100 shadow-xs">
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18"/></svg>
+        <button type="button" onclick="hapticTap(); switchIosTab('home')"
+          class="w-10 h-10 rounded-full bg-white border border-zinc-200/80 flex items-center justify-center text-zinc-800 hover:bg-zinc-50 active:scale-95 shadow-soft">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" />
+          </svg>
         </button>
         <h2 class="text-base font-extrabold text-zinc-900">File Upload Queue</h2>
-        <button type="button" onclick="triggerOneTapSync()"
-          class="w-10 h-10 rounded-full bg-white border border-zinc-200/80 flex items-center justify-center text-zinc-800 hover:bg-zinc-100 shadow-xs" title="Start All">
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/></svg>
+        <button type="button" onclick="hapticTap(); pickRealPhotos()"
+          class="w-10 h-10 rounded-full bg-white border border-zinc-200/80 flex items-center justify-center text-zinc-800 hover:bg-zinc-50 active:scale-95 shadow-soft" title="Add More">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+          </svg>
         </button>
       </div>
 
-      <div class="flex items-center justify-between pt-1">
-        <span id="ios-queue-status-label" class="text-sm font-extrabold text-zinc-900">Queue Ready</span>
-        <div class="flex items-center gap-1.5">
-          <span class="px-2.5 py-1 rounded-full bg-white text-[11px] font-mono font-bold text-zinc-700 shadow-xs tabular-nums" id="ios-queue-count-badge">
-            0 items
-          </span>
-        </div>
+      <div class="flex items-center justify-between px-0.5">
+        <span id="ios-queue-status-label" class="text-sm font-extrabold text-zinc-900">Queue Overview</span>
+        <span class="px-2.5 py-1 rounded-full bg-white text-[11px] font-mono font-bold text-zinc-700 shadow-2xs tabular-nums border border-zinc-100" id="ios-queue-count-badge">
+          0 items
+        </span>
       </div>
 
-      <!-- Upload Progress Cards -->
-      <div id="ios-upload-queue-list" class="space-y-2.5">
-        <!-- Populated by JS -->
+      <!-- Upload Queue Cards Container (Overall Batch Card + Per-File Items) -->
+      <div id="ios-upload-queue-list" class="space-y-3 pb-6">
+        <!-- Populated dynamically by JS -->
       </div>
     </section>
 
   </div>
 
   <!-- =================================================================== -->
-  <!-- SIGNATURE FLOATING BLACK PILL BOTTOM NAV BAR                        -->
+  <!-- 10. FLOATING PITCH BLACK PILL NAVIGATION BAR                        -->
   <!-- =================================================================== -->
-  <div class="fixed bottom-6 inset-x-4 max-w-sm mx-auto z-40 pb-[env(safe-area-inset-bottom,0px)]">
-    <!-- Ambient Mini Progress Dock (Visible when sync is running and user switches tabs) -->
+  <div class="fixed bottom-6 inset-x-4 max-w-sm mx-auto z-40 pb-[env(safe-area-inset-bottom,0px)] pointer-events-none">
+    
+    <!-- Ambient Mini Progress Dock (Visible when sync is running and user is on another screen) -->
     <div id="ios-dock-mini-progress" onclick="hapticTap(); switchIosTab('queue')"
-      class="hidden mb-2 px-4 py-2.5 bg-zinc-900/95 backdrop-blur-md rounded-2xl text-white shadow-pill flex items-center justify-between cursor-pointer border border-white/10 active:scale-[0.98] transition-all">
+      class="hidden mb-2 px-4 py-2.5 bg-zinc-900/95 backdrop-blur-md rounded-2xl text-white shadow-pill flex items-center justify-between cursor-pointer border border-white/10 active:scale-[0.98] transition-all pointer-events-auto">
       <div class="flex items-center gap-2.5 min-w-0">
-        <span class="w-2.5 h-2.5 rounded-full bg-electric animate-pulse"></span>
+        <span class="w-2.5 h-2.5 rounded-full bg-electric animate-pulse flex-shrink-0"></span>
         <span id="mini-progress-label" class="text-xs font-extrabold truncate">Syncing...</span>
       </div>
-      <span id="mini-progress-speed" class="font-mono text-[11px] text-zinc-300 tabular-nums">0.0 MB/s &rarr;</span>
+      <span id="mini-progress-speed" class="font-mono text-[11px] text-zinc-300 tabular-nums flex-shrink-0">0.0 MB/s &rarr;</span>
     </div>
 
-    <nav aria-label="iPhone Navigation" class="bg-pillnav rounded-full px-3 py-2 flex items-center justify-between shadow-pill border border-white/10">
+    <!-- Black Floating Pill Bar: #141519 -->
+    <nav aria-label="iPhone Navigation" class="bg-pillnav rounded-full px-3 py-2 flex items-center justify-between shadow-pill border border-white/10 pointer-events-auto">
       <!-- Tab 1: Home (48x48px touch target) -->
       <button type="button" onclick="hapticTap(); switchIosTab('home')" id="ios-nav-home"
         aria-label="Home"
@@ -365,7 +444,7 @@
       <button type="button" onclick="hapticTap(); pickRealPhotos()" id="ios-nav-center-plus"
         title="Add Photos from Camera Roll"
         aria-label="Add Photos from Camera Roll"
-        class="w-13 h-13 min-w-[52px] min-h-[52px] rounded-full bg-electric hover:bg-blue-600 active:scale-90 text-white flex items-center justify-center shadow-md transition-all">
+        class="w-13 h-13 min-w-[52px] min-h-[52px] rounded-full bg-electric hover:bg-blue-600 active:scale-90 text-white flex items-center justify-center shadow-electric transition-all">
         <svg id="ios-center-btn-icon" class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
         </svg>
@@ -378,15 +457,19 @@
         <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
         </svg>
-        <span id="nav-queue-badge" class="hidden absolute top-2 right-2 w-2.5 h-2.5 bg-electric rounded-full ring-2 ring-pillnav"></span>
+        <span id="nav-queue-badge" class="hidden absolute top-2.5 right-2.5 w-2.5 h-2.5 bg-electric rounded-full ring-2 ring-pillnav"></span>
       </button>
     </nav>
   </div>
 
+  <!-- =================================================================== -->
+  <!-- JAVASCRIPT: Engine, Chunking, Resuming, Haptics, Keep-Alive        -->
+  <!-- =================================================================== -->
   <script>
     const BASE = "{{BASE}}";
     const TOKEN = "{{TOKEN}}";
     window._lan_ip = "{{LAN_IP}}";
+
     function randomHex(len) {
       const arr = new Uint8Array(Math.ceil(len / 2));
       crypto.getRandomValues(arr);
@@ -396,6 +479,7 @@
     let activeXhr = null;
     let audioKeepAlive = null;
 
+    // Mobile Safari background sleep prevention via AudioContext
     function enableAudioKeepAlive() {
       if (audioKeepAlive) return;
       try {
@@ -404,7 +488,7 @@
         const ctx = new AudioCtx();
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
-        gain.gain.value = 0.0001; // essentially inaudible keep-alive loop
+        gain.gain.value = 0.0001; // virtually silent keep-alive tone
         osc.connect(gain);
         gain.connect(ctx.destination);
         osc.start(0);
@@ -421,6 +505,7 @@
       audioKeepAlive = null;
     }
 
+    // Haptic feedback for tactile iOS feel
     function hapticTap(type = 'light') {
       if (!('vibrate' in navigator)) return;
       try {
@@ -430,6 +515,7 @@
       } catch (_) {}
     }
 
+    // Direct High-Speed Wi-Fi LAN Probe
     async function probeLanFastPath() {
       const lanIp = window._lan_ip;
       if (!lanIp) return;
@@ -443,14 +529,19 @@
         if (resp.ok) {
           window._lan_fast_url = lanUrl;
           const connBadge = document.getElementById('ios-tunnel-dot');
+          const watermarkPill = document.getElementById('ios-watermark-pill');
           if (connBadge) {
             connBadge.className = 'w-2.5 h-2.5 rounded-full bg-blue-500 flex-shrink-0 animate-pulse';
             connBadge.title = 'Direct High-Speed Wi-Fi LAN Mode';
+          }
+          if (watermarkPill) {
+            watermarkPill.textContent = 'Direct Wi-Fi Mode • Ultra Fast';
           }
         }
       } catch (_) {}
     }
 
+    // Application State
     const app = {
       items: [],
       iosTab: 'home',
@@ -461,10 +552,7 @@
       showAllQueue: false,
       freeGB: 105.5,
       serverWatermark: 'Live',
-      serverTotalSynced: 0,
-      photosGB: 0,
-      videosGB: 0,
-      rawGB: 0
+      serverTotalSynced: 0
     };
 
     function pickRealPhotos() {
@@ -506,9 +594,9 @@
         }
         if (navBtn) {
           if (t === tab) {
-            navBtn.className = 'w-10 h-10 rounded-full bg-white text-zinc-900 flex items-center justify-center transition-all shadow-xs';
+            navBtn.className = 'w-12 h-12 rounded-full bg-white text-zinc-900 flex items-center justify-center transition-all shadow-xs active:scale-95';
           } else {
-            navBtn.className = 'w-10 h-10 rounded-full text-white/70 hover:text-white flex items-center justify-center transition-all';
+            navBtn.className = 'w-12 h-12 rounded-full text-white/70 hover:text-white flex items-center justify-center transition-all active:scale-95';
           }
         }
       });
@@ -534,6 +622,7 @@
       renderIosPhotosScreen();
     }
 
+    // Smart Resume & Duplicate Check via server /sync/diff endpoint
     async function checkServerDuplicates(itemsToCheck = null) {
       const pool = itemsToCheck || app.items.filter(i => !i.synced);
       if (!pool.length) return;
@@ -605,9 +694,10 @@
       switchIosTab('queue');
       app.isPaused = false;
       app.isSyncing = true;
-      startRealtimeSyncLoop( true );
+      startRealtimeSyncLoop(true);
     }
 
+    // Handle Selected Files from Picker or Drag & Drop
     function handleFilesSelected(files) {
       if (!files || !files.length) return;
       if (app.items.some(i => !i.file)) {
@@ -625,12 +715,12 @@
         const cat = isRaw ? 'raw' : (isVideo ? 'video' : 'photo');
         const sizeMB = Number((f.size / (1024 * 1024)).toFixed(1));
         const isImg = f.type.startsWith('image/');
-        const url = (isImg && idx < 30) ? URL.createObjectURL(f) : '';
+        const url = (isImg && idx < 40) ? URL.createObjectURL(f) : '';
 
         const itemObj = {
           id: 'rf_' + Date.now() + '_' + idx,
           file: f,
-          title: f.name.replace(/\\.[^/.]+$/, ""),
+          title: f.name.replace(/\.[^/.]+$/, ""),
           name: f.name,
           category: cat,
           sizeMB: sizeMB || 0.1,
@@ -652,35 +742,14 @@
       checkServerDuplicates(added);
     }
 
-    document.addEventListener('DOMContentLoaded', () => {
-      const picker = document.getElementById('real-file-picker');
-      if (picker) {
-        picker.addEventListener('change', (e) => {
-          handleFilesSelected(Array.from(picker.files || []));
-          picker.value = '';
-        });
-      }
-      window.addEventListener('dragover', (e) => { e.preventDefault(); });
-      window.addEventListener('drop', (e) => {
-        e.preventDefault();
-        if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
-          handleFilesSelected(Array.from(e.dataTransfer.files));
-        }
-      });
-      pollServerStatus();
-      setInterval(pollServerStatus, 3000);
-      probeLanFastPath();
-      setInterval(probeLanFastPath, 15000);
-      renderAll();
-    });
-
+    // Resumable Chunked Upload Engine
     async function uploadRealItem(item, sid) {
       enableAudioKeepAlive();
       let attempts = 0;
       const file = item.file;
       const totalSize = file.size;
 
-      // If file is > 10MB, upload in 5MB slices with resumable Content-Range
+      // Slices of 5MB for files > 10MB
       const CHUNK_SIZE = 5 * 1024 * 1024;
       const isChunked = totalSize > 10 * 1024 * 1024;
 
@@ -788,40 +857,7 @@
       }
     }
 
-    async function pollServerStatus() {
-      try {
-        const [stRes, syncRes] = await Promise.allSettled([
-          fetch(`${BASE}/status?batch=${BATCH}`),
-          fetch(`${BASE}/sync/status`)
-        ]);
-        if (stRes.status === 'fulfilled' && stRes.value.ok) {
-          const data = await stRes.value.json();
-          if (data.usable !== undefined) {
-            app.freeGB = Number((data.usable / (1024**3)).toFixed(1));
-            const hdr = document.getElementById('ios-header-status');
-            if (hdr) hdr.textContent = `Samsung Galaxy • ${app.freeGB.toFixed(0)} GB Free`;
-          }
-          if (data.sid && !window._pd_sid) {
-            window._pd_sid = data.sid;
-            try { sessionStorage.setItem('pd_sid', data.sid); } catch (_) {}
-          }
-        }
-        if (syncRes.status === 'fulfilled' && syncRes.value.ok) {
-          const syncData = await syncRes.value.json();
-          if (syncData.watermark) {
-            app.serverWatermark = syncData.watermark;
-            const wmPill = document.getElementById('ios-watermark-pill');
-            if (wmPill) wmPill.textContent = `Watermark: ${syncData.watermark.slice(5)}`;
-          }
-          if (syncData.total_synced !== undefined) {
-            app.serverTotalSynced = syncData.total_synced;
-            const bubbleSynced = document.getElementById('bubble-synced-sub');
-            if (bubbleSynced) bubbleSynced.textContent = syncData.total_synced.toLocaleString();
-          }
-        }
-      } catch (_) {}
-    }
-
+    // Real-Time Sync Loop
     async function startRealtimeSyncLoop(selectedOnly = false) {
       let wakeLock = null;
       try {
@@ -883,6 +919,44 @@
       }
     }
 
+    // Server Polling
+    async function pollServerStatus() {
+      try {
+        const [stRes, syncRes] = await Promise.allSettled([
+          fetch(`${BASE}/status?batch=${BATCH}`),
+          fetch(`${BASE}/sync/status`)
+        ]);
+        if (stRes.status === 'fulfilled' && stRes.value.ok) {
+          const data = await stRes.value.json();
+          if (data.usable !== undefined) {
+            app.freeGB = Number((data.usable / (1024**3)).toFixed(1));
+            const hdr = document.getElementById('ios-header-status');
+            if (hdr) hdr.textContent = `Samsung Galaxy • ${app.freeGB.toFixed(0)} GB Free`;
+          }
+          if (data.sid && !window._pd_sid) {
+            window._pd_sid = data.sid;
+            try { sessionStorage.setItem('pd_sid', data.sid); } catch (_) {}
+          }
+        }
+        if (syncRes.status === 'fulfilled' && syncRes.value.ok) {
+          const syncData = await syncRes.value.json();
+          if (syncData.watermark) {
+            app.serverWatermark = syncData.watermark;
+            const wmPill = document.getElementById('ios-watermark-pill');
+            if (wmPill && !window._lan_fast_url) {
+              wmPill.textContent = `Watermark: ${syncData.watermark.slice(5)}`;
+            }
+          }
+          if (syncData.total_synced !== undefined) {
+            app.serverTotalSynced = syncData.total_synced;
+            const bubbleSynced = document.getElementById('bubble-synced-sub');
+            if (bubbleSynced) bubbleSynced.textContent = syncData.total_synced.toLocaleString();
+          }
+        }
+      } catch (_) {}
+    }
+
+    // Render Home View
     function renderIosHome(stats) {
       document.getElementById('bubble-photos-sub').textContent = stats.newPhotos > 0 ? `${stats.newPhotos} New` : '0 New';
       document.getElementById('bubble-videos-sub').textContent = stats.newVideos > 0 ? `${stats.newVideos} New` : '0 New';
@@ -932,6 +1006,7 @@
       }
     }
 
+    // Render Photos Grid View
     function renderIosPhotosScreen() {
       const stats = getDeltaStats();
       const btnUnsynced = document.getElementById('seg-btn-unsynced');
@@ -941,11 +1016,11 @@
       if (btnAll) btnAll.textContent = `All Library (${app.items.length})`;
 
       if (app.photoFilter === 'unsynced') {
-        if (btnUnsynced) btnUnsynced.className = 'py-2.5 rounded-full text-xs font-bold bg-electric text-white shadow-xs transition-all tabular-nums';
-        if (btnAll) btnAll.className = 'py-2.5 rounded-full text-xs font-bold bg-white text-zinc-700 hover:bg-zinc-100 transition-all tabular-nums';
+        if (btnUnsynced) btnUnsynced.className = 'py-2.5 rounded-full text-xs font-extrabold bg-electric text-white shadow-soft transition-all tabular-nums';
+        if (btnAll) btnAll.className = 'py-2.5 rounded-full text-xs font-extrabold bg-white text-zinc-700 hover:bg-zinc-50 transition-all tabular-nums border border-zinc-200/60';
       } else {
-        if (btnAll) btnAll.className = 'py-2.5 rounded-full text-xs font-bold bg-electric text-white shadow-xs transition-all tabular-nums';
-        if (btnUnsynced) btnUnsynced.className = 'py-2.5 rounded-full text-xs font-bold bg-white text-zinc-700 hover:bg-zinc-100 transition-all tabular-nums';
+        if (btnAll) btnAll.className = 'py-2.5 rounded-full text-xs font-extrabold bg-electric text-white shadow-soft transition-all tabular-nums';
+        if (btnUnsynced) btnUnsynced.className = 'py-2.5 rounded-full text-xs font-extrabold bg-white text-zinc-700 hover:bg-zinc-50 transition-all tabular-nums border border-zinc-200/60';
       }
 
       const list = app.photoFilter === 'unsynced'
@@ -957,26 +1032,29 @@
 
       if (list.length === 0) {
         grid.innerHTML = `
-          <div class="col-span-2 bg-white rounded-[24px] p-8 text-center shadow-soft">
-            <div class="w-10 h-10 rounded-full bg-emerald-100 text-emerald-700 mx-auto flex items-center justify-center mb-2">
-              <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5"/></svg>
+          <div class="col-span-2 bg-white rounded-[26px] p-8 text-center shadow-soft border border-zinc-100">
+            <div class="w-12 h-12 rounded-full bg-emerald-50 text-emerald-600 mx-auto flex items-center justify-center mb-3">
+              <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5"/></svg>
             </div>
             <div class="text-xs font-extrabold text-zinc-900">Zero Unsynced Photos</div>
-            <p class="text-[11px] text-zinc-500 mt-0.5">Tap "+ Add" above to pick photos from your camera roll.</p>
+            <p class="text-[11px] text-zinc-500 mt-1">Tap "+ Add" above to pick photos from your iPhone camera roll.</p>
           </div>
         `;
       } else {
         grid.innerHTML = list.slice(0, 300).map(item => {
           const isSelected = item.selected && !item.synced;
           return `
-            <div onclick="togglePhotoSelect('${item.id}')" class="group cursor-pointer">
-              <div class="relative aspect-square rounded-[22px] overflow-hidden bg-zinc-200 shadow-xs border-2 transition-all ${
+            <div onclick="hapticTap(); togglePhotoSelect('${item.id}')" class="group cursor-pointer">
+              <div class="relative aspect-square rounded-[24px] overflow-hidden bg-zinc-200 shadow-soft border-2 transition-all ${
                 isSelected ? 'border-electric scale-[0.98]' : 'border-transparent'
-              } ${item.synced ? 'opacity-65' : ''}">
+              } ${item.synced ? 'opacity-60' : ''}">
                 ${item.url ? `
                   <img src="${item.url}" alt="${item.title}" loading="lazy" class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
                 ` : `
-                  <div class="w-full h-full bg-zinc-100 flex items-center justify-center font-bold text-xs text-zinc-500">${item.category.toUpperCase()}</div>
+                  <div class="w-full h-full bg-zinc-100 flex flex-col items-center justify-center text-zinc-500">
+                    <span class="font-extrabold text-xs tracking-wider">${item.category.toUpperCase()}</span>
+                    <span class="text-[10px] mt-1 text-zinc-400 font-mono">${item.sizeMB} MB</span>
+                  </div>
                 `}
                 <div class="absolute top-2.5 right-2.5">
                   ${item.synced ? `
@@ -1011,13 +1089,14 @@
           label.textContent = 'Tap Photos Above to Select';
           mbSpan.textContent = '0 MB';
         } else {
-          btn.className = 'w-full py-3.5 px-5 rounded-full bg-electric hover:bg-blue-700 active:scale-[0.99] text-white text-xs font-extrabold shadow-md flex items-center justify-between transition-all';
-          label.textContent = `Push ${selectedItems.length} Selected Photo${selectedItems.length === 1 ? '' : 's'}`;
+          btn.className = 'w-full py-3.5 px-5 rounded-full bg-electric hover:bg-blue-700 active:scale-[0.99] text-white text-xs font-extrabold shadow-electric flex items-center justify-between transition-all';
+          label.textContent = `Push ${selectedItems.length} Selected Item${selectedItems.length === 1 ? '' : 's'}`;
           mbSpan.textContent = `${selMB} MB →`;
         }
       }
     }
 
+    // Render Queue View
     function renderIosQueueScreen(stats) {
       const container = document.getElementById('ios-upload-queue-list');
       const badge = document.getElementById('ios-queue-count-badge');
@@ -1031,26 +1110,29 @@
       const syncedMB = app.items.filter(i => i.synced).reduce((s, i) => s + i.sizeMB, 0).toFixed(1);
       const overallPct = totalItems > 0 ? Math.round((syncedItems / totalItems) * 100) : 0;
 
+      // Overall Batch Progress Card with Pause/Resume and Smart Resume Check
       const batchCardHtml = `
-        <div class="bg-white rounded-[24px] p-4 shadow-soft space-y-2.5 mb-3">
+        <div class="bg-white rounded-[26px] p-4.5 shadow-card border border-zinc-100 space-y-3 mb-3">
           <div class="flex items-center justify-between text-xs font-extrabold text-zinc-900">
             <span>Overall Queue (${syncedItems} of ${totalItems} synced)</span>
-            <span class="font-mono text-electric tabular-nums">${overallPct}% · ${syncedMB}/${totalMB} MB</span>
+            <span class="font-mono text-electric tabular-nums">${overallPct}% &bull; ${syncedMB}/${totalMB} MB</span>
           </div>
           <div class="w-full h-2 rounded-full bg-zinc-100 overflow-hidden">
             <div class="h-full bg-electric rounded-full transition-all duration-300" style="width: ${overallPct}%"></div>
           </div>
           <div class="flex items-center justify-between pt-1">
-            <button type="button" onclick="togglePlayPause()"
-              class="px-3.5 py-1.5 rounded-full text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs ${
-                app.isSyncing ? 'bg-amber-100 text-amber-900 hover:bg-amber-200' : 'bg-electric text-white hover:bg-blue-700'
+            <button type="button" onclick="hapticTap(); togglePlayPause()"
+              class="px-4 py-2 rounded-full text-xs font-extrabold flex items-center gap-1.5 transition-all shadow-soft active:scale-95 ${
+                app.isSyncing ? 'bg-amber-100 text-amber-900 hover:bg-amber-200' : 'bg-electric text-white hover:bg-blue-700 shadow-electric'
               }">
               ${app.isSyncing ? '⏸ Pause' : (app.isPaused ? '▶ Resume' : '▶ Start Transfer')}
             </button>
-            <button type="button" onclick="checkServerDuplicates()"
-              class="px-2.5 py-1.5 rounded-full bg-zinc-100 hover:bg-zinc-200 text-[11px] font-bold text-zinc-600 flex items-center gap-1 transition-all"
+            <button type="button" onclick="hapticTap(); checkServerDuplicates()"
+              class="px-3 py-2 rounded-full bg-zinc-100 hover:bg-zinc-200 text-[11px] font-bold text-zinc-700 flex items-center gap-1.5 transition-all active:scale-95"
               title="Query Samsung for already-synced files and skip them">
-              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
               <span>Smart Resume Check</span>
             </button>
           </div>
@@ -1078,7 +1160,7 @@
         else if (app.isPaused) itemStatus = 'Paused';
 
         return `
-          <div class="bg-white rounded-2xl p-3 flex items-center justify-between gap-2 shadow-soft">
+          <div class="bg-white rounded-[22px] p-3 flex items-center justify-between gap-2 shadow-soft border border-zinc-100">
             <div class="flex items-center gap-3 min-w-0">
               ${item.url ? `
                 <img src="${item.url}" class="w-10 h-10 rounded-xl object-cover flex-shrink-0" />
@@ -1090,7 +1172,7 @@
               <div class="min-w-0">
                 <div class="text-xs font-extrabold text-zinc-900 truncate">${item.name}</div>
                 <div class="text-[10px] font-medium text-zinc-400 tabular-nums">
-                  ${item.sizeMB} MB • ${itemStatus}
+                  ${item.sizeMB} MB &bull; ${itemStatus}
                 </div>
               </div>
             </div>
@@ -1101,14 +1183,18 @@
               </div>
               <span id="prog-pct-${item.id}" class="text-xs font-extrabold text-zinc-900 tabular-nums w-8 text-right">${pct}%</span>
               ${!item.synced ? `
-                <button type="button" onclick="syncSingleItemNow('${item.id}')"
+                <button type="button" onclick="hapticTap(); syncSingleItemNow('${item.id}')"
                   title="Upload Immediately"
-                  class="w-7 h-7 rounded-full bg-electric text-white flex items-center justify-center hover:bg-blue-700">
-                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.3" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/></svg>
+                  class="w-7 h-7 rounded-full bg-electric text-white flex items-center justify-center hover:bg-blue-700 active:scale-95 shadow-xs">
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.3" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+                  </svg>
                 </button>
               ` : `
                 <span class="w-7 h-7 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center">
-                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5"/></svg>
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                  </svg>
                 </span>
               `}
             </div>
@@ -1120,7 +1206,7 @@
       if (allItems.length > 40 && !app.showAllQueue) {
         toggleAllHtml = `
           <button type="button" onclick="app.showAllQueue=true; renderAll();"
-            class="w-full py-2.5 rounded-xl bg-white border border-zinc-200 text-xs font-bold text-zinc-700 hover:bg-zinc-50 shadow-xs">
+            class="w-full py-2.5 rounded-2xl bg-white border border-zinc-200 text-xs font-extrabold text-zinc-700 hover:bg-zinc-50 shadow-soft">
             Show all ${allItems.length} queued files
           </button>
         `;
@@ -1129,6 +1215,7 @@
       container.innerHTML = batchCardHtml + listHtml + toggleAllHtml;
     }
 
+    // Sync Single Item Trigger
     async function syncSingleItemNow(id) {
       const item = app.items.find(i => i.id === id);
       if (!item || item.synced) return;
@@ -1155,13 +1242,14 @@
       renderAll();
     }
 
+    // Render Master Orchestrator
     function renderAll() {
       const stats = getDeltaStats();
       renderIosHome(stats);
       renderIosPhotosScreen();
       renderIosQueueScreen(stats);
 
-      // Ambient mini progress dock update
+      // Ambient Mini Progress Dock update
       const dock = document.getElementById('ios-dock-mini-progress');
       const queueDot = document.getElementById('nav-queue-badge');
       if (dock) {
@@ -1179,6 +1267,30 @@
         queueDot.classList.toggle('hidden', !app.isSyncing);
       }
     }
+
+    // Initialization
+    document.addEventListener('DOMContentLoaded', () => {
+      const picker = document.getElementById('real-file-picker');
+      if (picker) {
+        picker.addEventListener('change', () => {
+          handleFilesSelected(Array.from(picker.files || []));
+          picker.value = '';
+        });
+      }
+      window.addEventListener('dragover', (e) => { e.preventDefault(); });
+      window.addEventListener('drop', (e) => {
+        e.preventDefault();
+        if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+          handleFilesSelected(Array.from(e.dataTransfer.files));
+        }
+      });
+
+      pollServerStatus();
+      setInterval(pollServerStatus, 3000);
+      probeLanFastPath();
+      setInterval(probeLanFastPath, 15000);
+      renderAll();
+    });
   </script>
 </body>
 </html>
