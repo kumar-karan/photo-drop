@@ -6,13 +6,13 @@
     android:background="@color/page_bg"
     android:orientation="vertical">
 
-    <!-- ZONE 1: Top Status Band -->
+    <!-- Top Status Band -->
     <dev.photodrop.app.StatusStripView
         android:id="@+id/statusStrip"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"/>
 
-    <!-- ZONE 2: Stage (Scrollable) -->
+    <!-- Main Content Area -->
     <ScrollView
         android:layout_width="match_parent"
         android:layout_height="0dp"
@@ -27,8 +27,8 @@
             android:layout_height="wrap_content"
             android:paddingLeft="18dp"
             android:paddingRight="18dp"
-            android:paddingTop="12dp"
-            android:paddingBottom="16dp">
+            android:paddingTop="14dp"
+            android:paddingBottom="20dp">
 
             <!-- 1. Orb Stage (STOPPED / STARTING) -->
             <LinearLayout
@@ -37,8 +37,8 @@
                 android:layout_height="match_parent"
                 android:gravity="center"
                 android:orientation="vertical"
-                android:paddingTop="30dp"
-                android:paddingBottom="30dp">
+                android:paddingTop="36dp"
+                android:paddingBottom="36dp">
 
                 <dev.photodrop.app.OrbView
                     android:id="@+id/orbView"
@@ -57,7 +57,7 @@
                     android:textSize="13sp"/>
             </LinearLayout>
 
-            <!-- 2. Handoff & Storage Dashboard Container (ONLINE) -->
+            <!-- 2. Studio Receiver Dashboard (ONLINE) -->
             <LinearLayout
                 android:id="@+id/handoffCard"
                 android:layout_width="match_parent"
@@ -65,93 +65,164 @@
                 android:orientation="vertical"
                 android:visibility="gone">
 
-                <!-- MAIN HANDOFF CARD -->
+                <!-- Header Title Row: "DropServer" + Subtitle + Power/Settings Icons -->
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:background="@drawable/card_handoff"
-                    android:gravity="center_horizontal"
-                    android:orientation="vertical"
-                    android:paddingLeft="20dp"
-                    android:paddingRight="20dp"
-                    android:paddingTop="16dp"
-                    android:paddingBottom="18dp">
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
 
-                    <!-- Docked Live Badge -->
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="DropServer"
+                            android:textColor="@color/text_main"
+                            android:textSize="24sp"
+                            android:textStyle="bold"/>
+
+                        <TextView
+                            android:id="@+id/tvDropDomain"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:ellipsize="end"
+                            android:singleLine="true"
+                            android:text="trycloudflare.com"
+                            android:textColor="@color/text_faint"
+                            android:textSize="11.5sp"/>
+                    </LinearLayout>
+
+                    <!-- Status Pill: "200 OK" / "LIVE" -->
                     <TextView
                         android:id="@+id/tvDockedBadge"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:background="@drawable/badge_live"
                         android:paddingLeft="12dp"
-                        android:paddingTop="4dp"
+                        android:paddingTop="5dp"
                         android:paddingRight="12dp"
-                        android:paddingBottom="4dp"
-                        android:text="● LIVE"
+                        android:paddingBottom="5dp"
+                        android:text="200 OK"
                         android:textColor="#FFFFFF"
-                        android:textSize="10.5sp"
+                        android:textSize="11sp"
                         android:textStyle="bold"/>
+                </LinearLayout>
+
+                <!-- URL Endpoint Pill Bar -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:background="@drawable/card_handoff"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:paddingLeft="14dp"
+                    android:paddingTop="10dp"
+                    android:paddingRight="14dp"
+                    android:paddingBottom="10dp">
 
                     <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="8dp"
-                        android:letterSpacing="0.08"
-                        android:text="SCAN TO SEND ORIGINAL PHOTOS"
-                        android:textColor="@color/text_faint"
-                        android:textSize="9.5sp"
-                        android:textStyle="bold"/>
+                        android:layout_width="8dp"
+                        android:layout_height="8dp"
+                        android:background="@drawable/pill_success"/>
 
-                    <!-- Hostname / Domain headline -->
-                    <TextView
-                        android:id="@+id/tvDropDomain"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="3dp"
-                        android:ellipsize="end"
-                        android:singleLine="true"
-                        android:text="trycloudflare.com"
-                        android:textColor="@color/text_main"
-                        android:textSize="18sp"
-                        android:textStyle="bold"/>
-
-                    <!-- Monospace full URL -->
                     <TextView
                         android:id="@+id/tvDropUrl"
-                        android:layout_width="wrap_content"
+                        android:layout_width="0dp"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="2dp"
+                        android:layout_marginStart="8dp"
+                        android:layout_weight="1"
                         android:ellipsize="middle"
                         android:fontFamily="monospace"
                         android:singleLine="true"
-                        android:text="https://.../d/..."
+                        android:text="GET /d/.../sync/status"
                         android:textColor="@color/mono_text"
-                        android:textSize="11sp"/>
+                        android:textSize="11.5sp"/>
 
-                    <!-- 180dp ARM'S-LENGTH QR CODE -->
-                    <ImageView
-                        android:id="@+id/imgQr"
-                        android:layout_width="180dp"
-                        android:layout_height="180dp"
-                        android:layout_marginTop="12dp"
-                        android:background="#FFFFFF"
-                        android:contentDescription="QR code for photo drop link"
-                        android:padding="6dp"
-                        android:scaleType="fitCenter"/>
-
-                    <TextView
-                        android:id="@+id/tvDropHint"
-                        android:layout_width="260dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="10dp"
-                        android:gravity="center"
-                        android:lineSpacingExtra="2dp"
-                        android:text="They scan, pick photos, watch them upload. Nothing is installed on their phone."
-                        android:textColor="@color/text_faint"
-                        android:textSize="12sp"/>
+                    <Button
+                        android:id="@+id/btnFlipHost"
+                        android:layout_width="30dp"
+                        android:layout_height="30dp"
+                        android:background="@drawable/btn_tonal"
+                        android:text="⇄"
+                        android:textColor="@color/text_main"
+                        android:textSize="13sp"/>
                 </LinearLayout>
 
-                <!-- MINT STORAGE FOLDERS CONTAINER (From Studio Inspo) -->
+                <!-- 3 Pastel Action Pills: In / Free / QR -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:orientation="horizontal">
+
+                    <!-- Pill 1: Total In -->
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="36dp"
+                        android:layout_marginEnd="6dp"
+                        android:layout_weight="1"
+                        android:background="@drawable/card_mint"
+                        android:gravity="center"
+                        android:orientation="horizontal">
+
+                        <TextView
+                            android:id="@+id/tvPillTotalIn"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="0 In"
+                            android:textColor="@color/mint_text"
+                            android:textSize="11sp"
+                            android:textStyle="bold"/>
+                    </LinearLayout>
+
+                    <!-- Pill 2: Free Space -->
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="36dp"
+                        android:layout_marginEnd="6dp"
+                        android:layout_weight="1"
+                        android:background="@drawable/pill_danger"
+                        android:gravity="center"
+                        android:orientation="horizontal">
+
+                        <TextView
+                            android:id="@+id/tvPillFreeSpace"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="105 GB Free"
+                            android:textColor="#8C1D18"
+                            android:textSize="11sp"
+                            android:textStyle="bold"/>
+                    </LinearLayout>
+
+                    <!-- Pill 3: QR Toggle -->
+                    <LinearLayout
+                        android:id="@+id/btnToggleQr"
+                        android:layout_width="0dp"
+                        android:layout_height="36dp"
+                        android:layout_weight="1"
+                        android:background="@drawable/btn_tonal"
+                        android:gravity="center"
+                        android:orientation="horizontal">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="QR Code"
+                            android:textColor="@color/primary"
+                            android:textSize="11sp"
+                            android:textStyle="bold"/>
+                    </LinearLayout>
+                </LinearLayout>
+
+                <!-- CENTER MINT STORAGE FOLDERS CONTAINER (Exact Match to Reference) -->
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
@@ -160,36 +231,52 @@
                     android:orientation="vertical"
                     android:padding="14dp">
 
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="Samsung Storage Folders"
-                        android:textColor="@color/mint_text"
-                        android:textSize="12sp"
-                        android:textStyle="bold"/>
-
-                    <!-- Folder 1: DCIM / PhotoDrop -->
                     <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="8dp"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal">
+
+                        <TextView
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="Samsung Storage Folders ↑"
+                            android:textColor="@color/mint_text"
+                            android:textSize="12sp"
+                            android:textStyle="bold"/>
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="•••"
+                            android:textColor="@color/mint_text"
+                            android:textSize="12sp"
+                            android:textStyle="bold"/>
+                    </LinearLayout>
+
+                    <!-- Row 1: DCIM / PhotoDrop (Camera Roll Sync) -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="10dp"
                         android:background="@drawable/card_handoff"
                         android:gravity="center_vertical"
                         android:orientation="horizontal"
-                        android:padding="10dp">
+                        android:padding="12dp">
 
                         <TextView
-                            android:layout_width="32dp"
-                            android:layout_height="32dp"
-                            android:background="@drawable/pill_success"
+                            android:layout_width="38dp"
+                            android:layout_height="38dp"
+                            android:background="@drawable/card_mint"
                             android:gravity="center"
-                            android:text="📁"
-                            android:textSize="14sp"/>
+                            android:text="📷"
+                            android:textSize="16sp"/>
 
                         <LinearLayout
                             android:layout_width="0dp"
                             android:layout_height="wrap_content"
-                            android:layout_marginStart="10dp"
+                            android:layout_marginStart="12dp"
                             android:layout_weight="1"
                             android:orientation="vertical">
 
@@ -198,15 +285,16 @@
                                 android:layout_height="wrap_content"
                                 android:text="DCIM / PhotoDrop"
                                 android:textColor="@color/text_main"
-                                android:textSize="12.5sp"
+                                android:textSize="13sp"
                                 android:textStyle="bold"/>
 
                             <TextView
+                                android:id="@+id/tvFolderPhotosMeta"
                                 android:layout_width="wrap_content"
                                 android:layout_height="wrap_content"
                                 android:text="Direct inbox • Google Photos backup"
                                 android:textColor="@color/text_faint"
-                                android:textSize="10.5sp"/>
+                                android:textSize="11sp"/>
                         </LinearLayout>
 
                         <TextView
@@ -214,37 +302,37 @@
                             android:layout_height="wrap_content"
                             android:background="@drawable/badge_live"
                             android:paddingLeft="8dp"
-                            android:paddingTop="2dp"
+                            android:paddingTop="3dp"
                             android:paddingRight="8dp"
-                            android:paddingBottom="2dp"
+                            android:paddingBottom="3dp"
                             android:text="ACTIVE"
                             android:textColor="#FFFFFF"
-                            android:textSize="9sp"
+                            android:textSize="9.5sp"
                             android:textStyle="bold"/>
                     </LinearLayout>
 
-                    <!-- Folder 2: High-Watermark Ledger -->
+                    <!-- Row 2: High-Watermark Ledger -->
                     <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="6dp"
+                        android:layout_marginTop="8dp"
                         android:background="@drawable/card_handoff"
                         android:gravity="center_vertical"
                         android:orientation="horizontal"
-                        android:padding="10dp">
+                        android:padding="12dp">
 
                         <TextView
-                            android:layout_width="32dp"
-                            android:layout_height="32dp"
-                            android:background="@drawable/pill_neutral"
+                            android:layout_width="38dp"
+                            android:layout_height="38dp"
+                            android:background="@drawable/pill_warning"
                             android:gravity="center"
                             android:text="⚡"
-                            android:textSize="14sp"/>
+                            android:textSize="16sp"/>
 
                         <LinearLayout
                             android:layout_width="0dp"
                             android:layout_height="wrap_content"
-                            android:layout_marginStart="10dp"
+                            android:layout_marginStart="12dp"
                             android:layout_weight="1"
                             android:orientation="vertical">
 
@@ -253,7 +341,7 @@
                                 android:layout_height="wrap_content"
                                 android:text="sync_ledger.json"
                                 android:textColor="@color/text_main"
-                                android:textSize="12.5sp"
+                                android:textSize="13sp"
                                 android:textStyle="bold"/>
 
                             <TextView
@@ -261,7 +349,7 @@
                                 android:layout_width="wrap_content"
                                 android:layout_height="wrap_content"
                                 android:fontFamily="monospace"
-                                android:text="High-watermark auto resume active"
+                                android:text="Watermark: Live &amp; Ready"
                                 android:textColor="@color/text_faint"
                                 android:textSize="10.5sp"/>
                         </LinearLayout>
@@ -271,14 +359,55 @@
                             android:layout_height="wrap_content"
                             android:text="DIFF"
                             android:textColor="@color/primary"
-                            android:textSize="10.5sp"
+                            android:textSize="11sp"
                             android:textStyle="bold"/>
                     </LinearLayout>
                 </LinearLayout>
 
+                <!-- QR CODE POPUP CARD (Centered) -->
+                <LinearLayout
+                    android:id="@+id/qrContainer"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:background="@drawable/card_handoff"
+                    android:gravity="center_horizontal"
+                    android:orientation="vertical"
+                    android:padding="16dp">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:letterSpacing="0.08"
+                        android:text="HOLD THIS UP TO YOUR FRIEND"
+                        android:textColor="@color/text_faint"
+                        android:textSize="9.5sp"
+                        android:textStyle="bold"/>
+
+                    <ImageView
+                        android:id="@+id/imgQr"
+                        android:layout_width="160dp"
+                        android:layout_height="160dp"
+                        android:layout_marginTop="10dp"
+                        android:background="#FFFFFF"
+                        android:contentDescription="QR code for photo drop link"
+                        android:padding="6dp"
+                        android:scaleType="fitCenter"/>
+
+                    <TextView
+                        android:id="@+id/tvDropHint"
+                        android:layout_width="260dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:gravity="center"
+                        android:text="They scan, pick photos, watch them upload. Nothing is installed on their phone."
+                        android:textColor="@color/text_faint"
+                        android:textSize="11.5sp"/>
+                </LinearLayout>
+
             </LinearLayout>
 
-            <!-- 3. Storage Alert Card (STORAGE_LOW) -->
+            <!-- 3. Storage Alert Card -->
             <LinearLayout
                 android:id="@+id/alertCard"
                 android:layout_width="match_parent"
@@ -302,13 +431,12 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="6dp"
-                    android:lineSpacingExtra="2dp"
                     android:text="Uploads are paused at 2.0 GB free to keep your phone healthy. Free some storage to resume."
                     android:textColor="#8C1D18"
                     android:textSize="13sp"/>
             </LinearLayout>
 
-            <!-- 4. Termux Error Card (TERMUX_ERROR) -->
+            <!-- 4. Termux Error Card -->
             <LinearLayout
                 android:id="@+id/permCard"
                 android:layout_width="match_parent"
@@ -331,7 +459,6 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="6dp"
-                    android:lineSpacingExtra="2dp"
                     android:text="Grant permission to run commands in Termux, or ensure Termux is installed and running."
                     android:textColor="#C7CCD1"
                     android:textSize="13sp"/>
@@ -381,7 +508,7 @@
             android:orientation="vertical"
             android:visibility="gone">
 
-            <!-- URL snippet row with flip host button -->
+            <!-- URL snippet row with Copy Button -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -405,33 +532,24 @@
                     android:textSize="12sp"/>
 
                 <Button
-                    android:id="@+id/btnFlipHost"
-                    android:layout_width="38dp"
+                    android:id="@+id/btnCopy"
+                    android:layout_width="wrap_content"
                     android:layout_height="38dp"
-                    android:layout_marginLeft="8dp"
-                    android:background="@drawable/btn_tonal"
-                    android:text="⇄"
-                    android:textColor="@color/text_main"
-                    android:textSize="15sp"/>
+                    android:layout_marginStart="8dp"
+                    android:background="@drawable/btn_primary"
+                    android:paddingLeft="16dp"
+                    android:paddingRight="16dp"
+                    android:text="Copy"
+                    android:textAllCaps="false"
+                    android:textColor="@color/on_primary"
+                    android:textSize="13sp"
+                    android:textStyle="bold"/>
             </LinearLayout>
-
-            <!-- Copy Link Button (Pill shaped Electric Blue) -->
-            <Button
-                android:id="@+id/btnCopy"
-                android:layout_width="match_parent"
-                android:layout_height="46dp"
-                android:layout_marginTop="10dp"
-                android:background="@drawable/btn_primary"
-                android:text="Copy link to send"
-                android:textAllCaps="false"
-                android:textColor="@color/on_primary"
-                android:textSize="14.5sp"
-                android:textStyle="bold"/>
 
             <View
                 android:layout_width="match_parent"
                 android:layout_height="1dp"
-                android:layout_marginTop="12dp"
+                android:layout_marginTop="10dp"
                 android:layout_marginBottom="10dp"
                 android:background="@color/stroke_soft"/>
         </LinearLayout>
@@ -540,7 +658,7 @@
                 android:textSize="11.5sp"/>
         </LinearLayout>
 
-        <!-- Live Stop Button -->
+        <!-- Stop Server Button -->
         <LinearLayout
             android:id="@+id/liveStopSection"
             android:layout_width="match_parent"
@@ -561,7 +679,7 @@
                 android:textStyle="bold"/>
         </LinearLayout>
 
-        <!-- ZONE 4: Owner Dashboard Action -->
+        <!-- Owner Dashboard Action Button -->
         <Button
             android:id="@+id/btnOwner"
             android:layout_width="match_parent"

@@ -88,6 +88,10 @@ public class MainActivity extends Activity {
     ImageView imgQr;
     TextView tvDropHint;
     TextView tvLedgerSubtitle;
+    TextView tvPillTotalIn;
+    TextView tvPillFreeSpace;
+    View btnToggleQr;
+    View qrContainer;
 
     View alertCard;
     TextView tvAlertDesc;
@@ -143,6 +147,16 @@ public class MainActivity extends Activity {
         imgQr = findViewById(R.id.imgQr);
         tvDropHint = findViewById(R.id.tvDropHint);
         tvLedgerSubtitle = findViewById(R.id.tvLedgerSubtitle);
+        tvPillTotalIn = findViewById(R.id.tvPillTotalIn);
+        tvPillFreeSpace = findViewById(R.id.tvPillFreeSpace);
+        btnToggleQr = findViewById(R.id.btnToggleQr);
+        qrContainer = findViewById(R.id.qrContainer);
+
+        if (btnToggleQr != null && qrContainer != null) {
+            btnToggleQr.setOnClickListener(v -> {
+                qrContainer.setVisibility(qrContainer.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
+            });
+        }
 
         alertCard = findViewById(R.id.alertCard);
         tvAlertDesc = findViewById(R.id.tvAlertDesc);
@@ -550,6 +564,14 @@ public class MainActivity extends Activity {
             } else {
                 tvLedgerSubtitle.setText("Watermark: Live & Ready");
             }
+        }
+
+        if (tvPillTotalIn != null) {
+            tvPillTotalIn.setText(h.totalSynced + " In");
+        }
+        if (tvPillFreeSpace != null) {
+            String freeHuman = Health.human(h.free);
+            tvPillFreeSpace.setText(freeHuman.replace(".0", "") + " Free");
         }
 
         // State layout switching
