@@ -1008,3 +1008,52 @@ def test_500_photos_batch_diff_and_resume(client):
     assert len(d2["already_synced"]) == 25, f"Expected 25 already synced, got {len(d2['already_synced'])}"
     assert len(d2["need_upload"]) == 475, f"Expected 475 need upload, got {len(d2['need_upload'])}"
     assert d2["total_synced"] >= 25
+
+
+def test_chunked_resumable_upload(client):
+    """Verify that Content-Range chunks accumulate into .part and finalize when complete."""
+    import server
+
+    token = server.TOKEN
+    bid = "cc0011223344"
+    name = "Big_4K_Video.mov"
+    chunk1 = b"A" * (1024 * 1024)  # 1 MB
+    chunk2 = b"B" * (1024 * 1024)  # 1 MB
+    total_len = len(chunk1) + len(chunk2)
+
+    # 1. Send chunk 1
+    r1 = client.post(
+        f"/d/{token}/upload?batch={bid}&name={name}",
+        data=chunk1,
+        headers={
+            "Content-Type": "application/octet-stream",
+            "Content-Range": f"bytes 0-{len(chunk1)-1}/{total_len}",
+        },
+    )
+    assert r1.status_code == 200
+    d1 = r1.get_json()
+    assert d1["ok"] is True
+    assert d1["complete"] is False
+    assert d1["offset"] == len(chunk1)
+    # File not yet finalized in destination
+    assert not (server.DEST / "Big_4K_Video.mov").exists()
+
+    # 2. Send chunk 2 (final chunk)
+    r2 = client.post(
+        f"/d/{token}/upload?batch={bid}&name={name}",
+        data=chunk2,
+        headers={
+            "Content-Type": "application/octet-stream",
+            "Content-Range": f"bytes {len(chunk1)}-{total_len-1}/{total_len}",
+        },
+    )
+    assert r2.status_code == 200
+    d2 = r2.get_json()
+    assert d2["ok"] is True
+    assert d2["complete"] is True
+    assert d2["offset"] == total_len
+
+    # Finalized file exists and content matches concatenated chunks
+    saved = server.DEST / "Big_4K_Video.mov"
+    assert saved.exists()
+    assert saved.read_bytes() == (chunk1 + chunk2)

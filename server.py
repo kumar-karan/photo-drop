@@ -29,6 +29,7 @@ import concurrent.futures
 import hmac
 import json
 import os
+import queue
 import re
 import secrets
 import shutil
@@ -94,7 +95,9 @@ MAX_FILES_PER_SESSION = int(os.environ.get("PHOTO_DROP_MAX_FILES", "50000"))
 MAX_CONCURRENT_UPLOADS = int(os.environ.get("PHOTO_DROP_MAX_CONCURRENT", "3"))
 UPLOAD_ACQUIRE_TIMEOUT = float(os.environ.get("PHOTO_DROP_ACQUIRE_TIMEOUT", "5.0"))
 _UPLOAD_SLOTS = threading.BoundedSemaphore(max(1, MAX_CONCURRENT_UPLOADS))
-_SCAN_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="media-scan")
+_SCAN_QUEUE: queue.Queue = queue.Queue()
+_SCAN_WORKER_STARTED = False
+_SCAN_WORKER_LOCK = threading.Lock()
 
 # How long a session cookie stays valid.
 SESSION_TTL = int(os.environ.get("PHOTO_DROP_SESSION_TTL", str(12 * 3600)))
@@ -1340,13 +1343,47 @@ def scan_media(paths: list[str]) -> str:
     return detail[-1].split(":")[0].removeprefix("scanned(") if detail else "unknown"
 
 
+def _scan_worker():
+    """Background worker that drains media scan requests in batches."""
+    while True:
+        try:
+            item = _SCAN_QUEUE.get(timeout=2.0)
+        except queue.Empty:
+            continue
+
+        items = [item]
+        # Drain up to 24 additional items that arrived in the queue
+        while len(items) < 25:
+            try:
+                items.append(_SCAN_QUEUE.get_nowait())
+            except queue.Empty:
+                break
+
+        paths = [it[0] for it in items]
+        names = [it[2] for it in items]
+        try:
+            scanned = scan_media(paths)
+            log(f"background batch scan ({len(paths)} files): {', '.join(names[:3])}{'...' if len(names) > 3 else ''} -> {scanned}")
+        except Exception as exc:
+            log(f"background batch scan error: {exc}")
+        finally:
+            for _ in items:
+                _SCAN_QUEUE.task_done()
+
+
+def _ensure_scan_worker():
+    global _SCAN_WORKER_STARTED
+    with _SCAN_WORKER_LOCK:
+        if not _SCAN_WORKER_STARTED:
+            t = threading.Thread(target=_scan_worker, name="media-scan-batcher", daemon=True)
+            t.start()
+            _SCAN_WORKER_STARTED = True
+
+
 def _scan_background(path: str, bid: str, name: str):
-    """Notify MediaProvider asynchronously so HTTP upload responses return immediately."""
-    try:
-        scanned = scan_media([path])
-        log(f"background scan: {name} -> {scanned}")
-    except Exception as exc:
-        log(f"background scan error ({name}): {exc}")
+    """Queue file for batched MediaProvider notification."""
+    _ensure_scan_worker()
+    _SCAN_QUEUE.put((path, bid, name))
 
 
 _SCAN_SELFTEST = {"at": 0.0, "text": ""}
@@ -1537,6 +1574,7 @@ def drop_page(token: str):
         .replace("{{RESERVE}}", human(RESERVE_BYTES))
         .replace("{{MAX_MB}}", str(MAX_FILE_BYTES // (1024 * 1024)))
         .replace("{{TOKEN}}", TOKEN)
+        .replace("{{LAN_IP}}", get_lan_ip())
     )
     resp = make_response(body)
     resp.headers["Content-Type"] = "text/html; charset=utf-8"
@@ -1665,13 +1703,28 @@ def upload(token: str):
     original = request.args.get("name") or "photo"
     declared = request.content_length
 
-    if declared is None:
+    # Parse optional chunking/resumption headers
+    content_range = request.headers.get("Content-Range", "").strip()
+    range_offset = 0
+    total_size = declared or 0
+
+    if content_range:
+        # Format: bytes <start>-<end>/<total>
+        match = re.match(r"bytes\s+(\d+)-(\d+)/(\d+|\*)", content_range, re.IGNORECASE)
+        if match:
+            range_offset = int(match.group(1))
+            range_end = int(match.group(2))
+            if match.group(3) != "*":
+                total_size = int(match.group(3))
+
+    if declared is None and not content_range:
         return jsonify(ok=False, error="missing content length"), 411
-    if declared > MAX_FILE_BYTES:
+    if (total_size or declared or 0) > MAX_FILE_BYTES:
         return jsonify(ok=False, error="file is larger than the per-file limit"), 413
     # Reject before reading anything — the common failure is a full phone, and
     # there is no reason to write 40 GB into it first.
-    if not enough_space(declared):
+    bytes_needed = (total_size - range_offset) if (total_size and total_size > range_offset) else (declared or 0)
+    if not enough_space(bytes_needed):
         return jsonify(ok=False, error="phone storage is full"), 507
     if disk_free_home() - 5_000_000 < RESERVE_BYTES // 4:
         return jsonify(ok=False, error="phone storage is full"), 507
@@ -1684,7 +1737,7 @@ def upload(token: str):
         busy.headers["Retry-After"] = "5"
         return busy, 503
 
-    transfer_id = start_transfer(sid, bid, original, declared or 0)
+    transfer_id = start_transfer(sid, bid, original, total_size or declared or 0)
     saved = False
 
     try:
@@ -1694,16 +1747,24 @@ def upload(token: str):
         target = dest_dir / name
         tmp = dest_dir / f".{name}.part"
 
-        written = 0
-        last_home_check = 0
+        # Check existing offset in partial file
+        mode = "ab" if (range_offset > 0 and tmp.exists()) else "wb"
+        existing_size = tmp.stat().st_size if tmp.exists() else 0
+        if range_offset > 0 and existing_size != range_offset:
+            # If server part file does not match requested offset, reset or report conflict
+            range_offset = existing_size
+            mode = "ab"
+
+        written = range_offset
+        last_home_check = written
         try:
-            with open(tmp, "wb") as out:
+            with open(tmp, mode) as out:
                 while True:
                     chunk = request.stream.read(256 * 1024)
                     if not chunk:
                         break
                     written += len(chunk)
-                    if written > MAX_FILE_BYTES or not enough_space(written):
+                    if written > MAX_FILE_BYTES or not enough_space(written - existing_size):
                         raise OSError("phone storage filled up mid-upload")
                     if written - last_home_check >= 8 * 1024 * 1024:
                         last_home_check = written
@@ -1711,22 +1772,31 @@ def upload(token: str):
                             raise OSError("phone storage filled up mid-upload")
                     out.write(chunk)
                     update_transfer(transfer_id, written)
-            os.replace(tmp, target)
+
+            # Check if this is the final piece of the upload
+            is_complete = True
+            if content_range and total_size > 0:
+                is_complete = (written >= total_size)
+
+            if is_complete:
+                os.replace(tmp, target)
         except (OSError, ClientDisconnected) as exc:
-            tmp.unlink(missing_ok=True)
+            if not content_range:
+                tmp.unlink(missing_ok=True)
             log(f"upload rejected ({original}): {exc}")
             return jsonify(ok=False, error=str(exc)), 507
 
-        # Record upload and notify MediaProvider in background to avoid blocking
-        # upload slots or timing out over mobile tunnels.
-        record_upload(bid, name, original, written, "pending")
-        record_ledger_entry(name, original, written)
-        saved = True
-        log(f"saved {original} -> {name} ({written}B)")
-        try:
-            _SCAN_EXECUTOR.submit(_scan_background, str(target), bid, name)
-        except Exception as exc:
-            log(f"failed to dispatch scan for {name}: {exc}")
+        if is_complete:
+            # Record upload and notify MediaProvider in background to avoid blocking
+            # upload slots or timing out over mobile tunnels.
+            record_upload(bid, name, original, written, "pending")
+            record_ledger_entry(name, original, written)
+            saved = True
+            log(f"saved {original} -> {name} ({written}B)")
+            try:
+                _scan_background(str(target), bid, name)
+            except Exception as exc:
+                log(f"failed to dispatch scan for {name}: {exc}")
     finally:
         finish_transfer(transfer_id, saved)
         # Released even when the write fails, so one bad upload cannot wedge
@@ -1738,7 +1808,9 @@ def upload(token: str):
         batch=bid,
         scanned="pending",
         free=disk_free(),
-        files=[{"name": name, "size": written}],
+        offset=written,
+        complete=is_complete,
+        files=[{"name": name, "size": written}] if is_complete else [],
         session=sid[:6],
         sid=sid,
     )

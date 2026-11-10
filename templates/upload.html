@@ -370,6 +370,7 @@
   <script>
     const BASE = "{{BASE}}";
     const TOKEN = "{{TOKEN}}";
+    window._lan_ip = "{{LAN_IP}}";
     function randomHex(len) {
       const arr = new Uint8Array(Math.ceil(len / 2));
       crypto.getRandomValues(arr);
@@ -377,6 +378,53 @@
     }
     const BATCH = randomHex(12);
     let activeXhr = null;
+    let audioKeepAlive = null;
+
+    function enableAudioKeepAlive() {
+      if (audioKeepAlive) return;
+      try {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (!AudioCtx) return;
+        const ctx = new AudioCtx();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        gain.gain.value = 0.0001; // essentially inaudible keep-alive loop
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(0);
+        audioKeepAlive = { ctx, osc, gain };
+      } catch (_) {}
+    }
+
+    function disableAudioKeepAlive() {
+      if (!audioKeepAlive) return;
+      try {
+        audioKeepAlive.osc.stop();
+        audioKeepAlive.ctx.close();
+      } catch (_) {}
+      audioKeepAlive = null;
+    }
+
+    async function probeLanFastPath() {
+      const lanIp = window._lan_ip;
+      if (!lanIp) return;
+      const lanUrl = `http://${lanIp}:8080`;
+      if (BASE.startsWith(lanUrl)) return;
+      try {
+        const ctrl = new AbortController();
+        const timeout = setTimeout(() => ctrl.abort(), 1200);
+        const resp = await fetch(`${lanUrl}/healthz`, { mode: 'cors', signal: ctrl.signal });
+        clearTimeout(timeout);
+        if (resp.ok) {
+          window._lan_fast_url = lanUrl;
+          const connBadge = document.getElementById('ios-tunnel-dot');
+          if (connBadge) {
+            connBadge.className = 'w-2.5 h-2.5 rounded-full bg-blue-500 flex-shrink-0 animate-pulse';
+            connBadge.title = 'Direct High-Speed Wi-Fi LAN Mode';
+          }
+        }
+      } catch (_) {}
+    }
 
     const app = {
       items: [],
@@ -596,70 +644,103 @@
       });
       pollServerStatus();
       setInterval(pollServerStatus, 3000);
+      probeLanFastPath();
+      setInterval(probeLanFastPath, 15000);
       renderAll();
     });
 
     async function uploadRealItem(item, sid) {
+      enableAudioKeepAlive();
       let attempts = 0;
+      const file = item.file;
+      const totalSize = file.size;
+
+      // If file is > 10MB, upload in 5MB slices with resumable Content-Range
+      const CHUNK_SIZE = 5 * 1024 * 1024;
+      const isChunked = totalSize > 10 * 1024 * 1024;
+
       while (attempts < 3) {
         if (app.isPaused) throw new Error('Transfer paused');
         try {
-          await new Promise((resolve, reject) => {
-            const xhr = new XMLHttpRequest();
-            activeXhr = xhr;
-            xhr.withCredentials = true;
-            const url = `${BASE}/upload?batch=${BATCH}&name=${encodeURIComponent(item.name)}&sid=${encodeURIComponent(sid)}`;
-            const startTime = Date.now();
-            xhr.upload.onprogress = (e) => {
-              if (e.lengthComputable && e.total > 0) {
-                const pct = Math.min(99, Math.round((e.loaded / e.total) * 100));
-                item.progress = pct;
-                const fill = document.getElementById(`prog-fill-${item.id}`);
-                const pctEl = document.getElementById(`prog-pct-${item.id}`);
-                if (fill) fill.style.width = pct + '%';
-                if (pctEl) pctEl.textContent = pct + '%';
+          let currentOffset = item.uploadedBytes || 0;
 
-                const elapsed = (Date.now() - startTime) / 1000;
-                if (elapsed > 0.2) {
-                  const mbSec = (e.loaded / (1024 * 1024)) / elapsed;
-                  const speedEl = document.getElementById('ios-hero-speed');
-                  if (speedEl) {
-                    speedEl.classList.remove('hidden');
-                    speedEl.textContent = mbSec.toFixed(1) + ' MB/s';
+          while (currentOffset < totalSize) {
+            if (app.isPaused) throw new Error('Transfer paused');
+
+            const nextChunkEnd = isChunked ? Math.min(totalSize, currentOffset + CHUNK_SIZE) : totalSize;
+            const chunkSlice = isChunked ? file.slice(currentOffset, nextChunkEnd) : file;
+
+            await new Promise((resolve, reject) => {
+              const xhr = new XMLHttpRequest();
+              activeXhr = xhr;
+              xhr.withCredentials = true;
+
+              const targetBase = window._lan_fast_url ? `${window._lan_fast_url}/d/${TOKEN}` : BASE;
+              const url = `${targetBase}/upload?batch=${BATCH}&name=${encodeURIComponent(item.name)}&sid=${encodeURIComponent(sid)}`;
+
+              const startTime = Date.now();
+              xhr.upload.onprogress = (e) => {
+                if (e.lengthComputable && e.total > 0) {
+                  const chunkLoaded = e.loaded;
+                  const totalLoaded = currentOffset + chunkLoaded;
+                  const pct = Math.min(99, Math.round((totalLoaded / totalSize) * 100));
+                  item.progress = pct;
+                  const fill = document.getElementById(`prog-fill-${item.id}`);
+                  const pctEl = document.getElementById(`prog-pct-${item.id}`);
+                  if (fill) fill.style.width = pct + '%';
+                  if (pctEl) pctEl.textContent = pct + '%';
+
+                  const elapsed = (Date.now() - startTime) / 1000;
+                  if (elapsed > 0.2) {
+                    const mbSec = (chunkLoaded / (1024 * 1024)) / elapsed;
+                    const speedEl = document.getElementById('ios-hero-speed');
+                    if (speedEl) {
+                      speedEl.classList.remove('hidden');
+                      speedEl.textContent = mbSec.toFixed(1) + ' MB/s';
+                    }
                   }
                 }
+              };
+
+              xhr.onload = () => {
+                activeXhr = null;
+                if (xhr.status >= 200 && xhr.status < 300) {
+                  try {
+                    const res = JSON.parse(xhr.responseText || '{}');
+                    if (res.sid) {
+                      window._pd_sid = res.sid;
+                      try { sessionStorage.setItem('pd_sid', res.sid); } catch (_) {}
+                    }
+                  } catch (_) {}
+                  resolve();
+                } else {
+                  let msg = `HTTP ${xhr.status}`;
+                  try {
+                    const res = JSON.parse(xhr.responseText || '{}');
+                    if (res.error) msg = res.error;
+                  } catch (_) {}
+                  reject(new Error(msg));
+                }
+              };
+
+              xhr.onerror = () => { activeXhr = null; reject(new Error('Connection dropped')); };
+              xhr.ontimeout = () => { activeXhr = null; reject(new Error('Upload timeout')); };
+              xhr.onabort = () => { activeXhr = null; reject(new Error('Transfer paused')); };
+              xhr.timeout = 240000;
+
+              xhr.open('POST', url);
+              if (sid) {
+                try { xhr.setRequestHeader('X-PD-Session', sid); } catch (_) {}
               }
-            };
-            xhr.onload = () => {
-              activeXhr = null;
-              if (xhr.status >= 200 && xhr.status < 300) {
-                try {
-                  const res = JSON.parse(xhr.responseText || '{}');
-                  if (res.sid) {
-                    window._pd_sid = res.sid;
-                    try { sessionStorage.setItem('pd_sid', res.sid); } catch (_) {}
-                  }
-                } catch (_) {}
-                resolve();
-              } else {
-                let msg = `HTTP ${xhr.status}`;
-                try {
-                  const res = JSON.parse(xhr.responseText || '{}');
-                  if (res.error) msg = res.error;
-                } catch (_) {}
-                reject(new Error(msg));
+              if (isChunked) {
+                xhr.setRequestHeader('Content-Range', `bytes ${currentOffset}-${nextChunkEnd - 1}/${totalSize}`);
               }
-            };
-            xhr.onerror = () => { activeXhr = null; reject(new Error('Connection dropped')); };
-            xhr.ontimeout = () => { activeXhr = null; reject(new Error('Upload timeout')); };
-            xhr.onabort = () => { activeXhr = null; reject(new Error('Transfer paused')); };
-            xhr.timeout = 180000;
-            xhr.open('POST', url);
-            if (sid) {
-              try { xhr.setRequestHeader('X-PD-Session', sid); } catch (_) {}
-            }
-            xhr.send(item.file);
-          });
+              xhr.send(chunkSlice);
+            });
+
+            currentOffset = nextChunkEnd;
+            item.uploadedBytes = currentOffset;
+          }
           return;
         } catch (err) {
           if (app.isPaused) throw err;
@@ -721,6 +802,7 @@
         const remaining = app.items.filter(i => !i.synced && (!selectedOnly || i.selected));
         if (remaining.length === 0) {
           app.isSyncing = false;
+          disableAudioKeepAlive();
           renderAll();
           break;
         }
@@ -738,12 +820,12 @@
             }
           } catch (err) {
             if (app.isPaused) {
-              current.progress = 0;
               break;
             }
             current.err = true;
             current.errMessage = err.message || 'Failed';
             app.isSyncing = false;
+            disableAudioKeepAlive();
             renderAll();
             break;
           }
@@ -755,6 +837,9 @@
 
       if (wakeLock) {
         try { await wakeLock.release(); } catch (_) {}
+      }
+      if (!app.isSyncing) {
+        disableAudioKeepAlive();
       }
     }
 
