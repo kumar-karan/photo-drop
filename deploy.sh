@@ -48,8 +48,9 @@ adb -s "$SERIAL" shell mkdir -p "$STAGE" >/dev/null 2>&1
 for f in server.py media_scan.sh install.sh start.sh stop.sh pd-control.sh lib.sh README.md LICENSE .gitignore; do
   adb -s "$SERIAL" push -q "$SRC/$f" "$STAGE/$f" >/dev/null || die "push failed: $f"
 done
+adb -s "$SERIAL" push -q "$SRC/templates" "$STAGE/templates" >/dev/null || die "push failed: templates/"
 adb -s "$SERIAL" push -q "$SRC/tests" "$STAGE/tests" >/dev/null || die "push failed: tests/"
-echo "  $(ls -1 "$SRC" | wc -l | tr -d ' ') files + tests/"
+echo "  $(ls -1 "$SRC" | wc -l | tr -d ' ') files + templates/ + tests/"
 
 # Termux cannot read /sdcard directly; it needs them under its own home.
 say "4/5  next step on the phone"

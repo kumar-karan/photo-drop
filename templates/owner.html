@@ -1,0 +1,577 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#f9f9ff">
+<title>Photo Drop — Live</title>
+<style>
+  :root {
+    --bg: #f9f9ff;
+    --surface: #ffffff;
+    --surface-low: #f1f3ff;
+    --surface-mid: #e9edff;
+    --surface-high: #e1e8fd;
+    --ink: #141b2b;
+    --muted: #3e4943;
+    --faint: #6e7a73;
+    --line: #dce2f7;
+    --line-soft: #edf0fa;
+    --primary: #005d42;
+    --primary-soft: #e6f4ea;
+    --primary-tint: #97f5cc;
+    --accent: #904d00;
+    --accent-soft: #ffdcc3;
+    --danger: #ba1a1a;
+    --danger-soft: #ffdad6;
+    --shadow: 0 1px 2px rgba(20, 27, 43, .05), 0 8px 24px rgba(20, 27, 43, .05);
+    --radius: 18px;
+    --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; background: var(--bg); }
+  body {
+    color: var(--ink);
+    font-family: var(--font);
+    font-size: 15px;
+    line-height: 1.45;
+    min-height: 100vh;
+    padding: calc(env(safe-area-inset-top, 0px) + 18px) 16px calc(env(safe-area-inset-bottom, 0px) + 28px);
+  }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  .top { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+  .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .logo {
+    width: 42px; height: 42px; border-radius: 13px; flex: 0 0 auto;
+    background: linear-gradient(145deg, #047857 0%, #005d42 100%);
+    color: #fff; display: grid; place-items: center;
+    box-shadow: 0 6px 16px rgba(0, 93, 66, .22);
+  }
+  .brand h1 { font-size: 17px; line-height: 1.15; margin: 0; letter-spacing: -.02em; }
+  .brand p { margin: 2px 0 0; color: var(--faint); font-size: 11.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
+  .live { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; padding: 5px 10px; border-radius: 99px; background: var(--surface-mid); color: var(--primary); font-size: 11.5px; font-weight: 700; }
+  .live.offline { background: var(--danger-soft); color: var(--danger); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--primary); box-shadow: 0 0 0 4px rgba(0, 93, 66, .1); animation: pulse 1.8s ease-in-out infinite; }
+  .live.offline .dot { background: var(--danger); box-shadow: none; animation: none; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+
+  .hero { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; box-shadow: var(--shadow); margin-bottom: 20px; }
+  .hero-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+  .eyebrow { margin: 0 0 5px; color: var(--faint); font-size: 10.5px; font-weight: 800; letter-spacing: .12em; }
+  .hero h2 { margin: 0; font-size: 23px; line-height: 1.15; letter-spacing: -.03em; }
+  .hero-sub { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+  .hero-badge { flex: 0 0 auto; border-radius: 99px; padding: 5px 10px; background: var(--primary-soft); color: var(--primary); font-size: 11px; font-weight: 800; letter-spacing: .04em; }
+  .hero-badge.warn { background: var(--danger-soft); color: var(--danger); }
+  .storage { margin-top: 16px; }
+  .storage-row { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; color: var(--muted); font-size: 12px; margin-bottom: 7px; }
+  .storage-row b { color: var(--ink); font-size: 13px; }
+  .bar { position: relative; height: 9px; border-radius: 99px; background: var(--surface-high); overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 99px; background: linear-gradient(90deg, #047857, #10a06d); transition: width .35s ease; }
+  .bar-reserve { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--accent); opacity: .7; transition: left .35s ease; }
+  .storage-hint { display: flex; justify-content: space-between; gap: 10px; margin-top: 6px; color: var(--faint); font-size: 11px; }
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 14px; }
+  .stat { background: var(--surface-low); border-radius: 12px; padding: 10px; min-width: 0; }
+  .stat-label { display: block; color: var(--faint); font-size: 10.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+  .stat-value { display: block; margin-top: 2px; font-size: 19px; font-weight: 800; line-height: 1.1; font-variant-numeric: tabular-nums; }
+  .stat-sub { display: block; color: var(--faint); font-size: 11px; margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  .section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin: 20px 2px 9px; }
+  .section-head h2 { margin: 0; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  .section-head span { color: var(--faint); font-size: 11.5px; font-weight: 600; }
+  .sessions { display: flex; flex-direction: column; gap: 10px; }
+  .session { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 14px; box-shadow: var(--shadow); }
+  .session.state-uploading { border-color: #b7dfc4; box-shadow: 0 0 0 2px rgba(4, 120, 87, .07), var(--shadow); }
+  .s-top { display: flex; align-items: center; gap: 10px; }
+  .avatar { width: 38px; height: 38px; border-radius: 12px; flex: 0 0 auto; display: grid; place-items: center; background: var(--surface-mid); color: var(--primary); font-weight: 800; font-size: 15px; }
+  .s-id { min-width: 0; flex: 1; }
+  .s-name { font-size: 14.5px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .s-meta { color: var(--faint); font-size: 11.5px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pill { flex: 0 0 auto; border-radius: 99px; padding: 4px 8px; font-size: 10.5px; font-weight: 800; letter-spacing: .02em; }
+  .pill.uploading { background: var(--primary-soft); color: var(--primary); }
+  .pill.recent { background: #e7f7ee; color: #0b6b42; }
+  .pill.connected { background: var(--surface-mid); color: var(--primary); }
+  .pill.idle { background: var(--surface-low); color: var(--faint); }
+  .s-stats { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 10px; color: var(--faint); font-size: 11.5px; }
+  .s-stats b { color: var(--ink); font-size: 12.5px; }
+  .active-list { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .active-file { background: var(--surface-low); border-radius: 11px; padding: 9px 10px; }
+  .active-top { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; }
+  .fname { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+  .fsize { flex: 0 0 auto; color: var(--primary); font-weight: 700; font-variant-numeric: tabular-nums; }
+  .mini-bar { height: 5px; border-radius: 99px; background: var(--surface-high); overflow: hidden; margin-top: 6px; }
+  .mini-fill { height: 100%; border-radius: 99px; background: linear-gradient(90deg, #047857, #10a06d); transition: width .25s linear; }
+  .active-sub { color: var(--faint); font-size: 10.5px; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
+  .chip { max-width: 100%; border-radius: 99px; background: var(--surface-low); color: var(--muted); padding: 4px 8px; font-size: 10.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .empty { display: none; text-align: center; padding: 24px 14px; border: 1px dashed var(--line); border-radius: 16px; color: var(--faint); font-size: 13px; background: rgba(255,255,255,.55); }
+
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 14px; box-shadow: var(--shadow); }
+  .muted { color: var(--faint); font-size: 12.5px; margin: 0; }
+  .list { display: flex; flex-direction: column; gap: 0; padding: 4px 14px; }
+  .activity { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--line-soft); min-width: 0; }
+  .activity:last-child { border-bottom: none; }
+  .activity-icon { width: 32px; height: 32px; flex: 0 0 auto; border-radius: 10px; background: var(--primary-soft); color: var(--primary); display: grid; place-items: center; }
+  .activity-body { min-width: 0; flex: 1; }
+  .activity-name { font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .activity-meta { color: var(--faint); font-size: 10.5px; margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .activity-size { flex: 0 0 auto; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .activity-empty { padding: 16px 0; color: var(--faint); font-size: 12.5px; text-align: center; }
+
+  .link-row { display: flex; align-items: stretch; gap: 8px; margin-top: 10px; }
+  .link-row code { flex: 1; min-width: 0; background: var(--surface-low); border-radius: 10px; padding: 9px 10px; font-family: var(--mono); font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .btn { appearance: none; border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: 10px; padding: 8px 12px; font: inherit; font-size: 12px; font-weight: 700; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; gap: 6px; cursor: pointer; }
+  .btn:active { transform: translateY(1px); }
+  .btn.small { flex: 0 0 auto; background: var(--primary); border-color: var(--primary); color: #fff; }
+  .btn.ghost { background: var(--surface-low); color: var(--muted); }
+  .btn.danger { background: var(--danger-soft); border-color: #f2c0bc; color: var(--danger); }
+  .btn:disabled { opacity: .5; }
+  .sys { display: flex; flex-direction: column; gap: 9px; }
+  .kv { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; font-size: 12.5px; color: var(--faint); }
+  .kv b, .kv code { color: var(--ink); text-align: right; font-weight: 600; overflow-wrap: anywhere; }
+  .kv code { font-family: var(--mono); font-size: 11px; }
+  details { margin-top: 2px; }
+  summary { cursor: pointer; color: var(--primary); font-size: 12px; font-weight: 700; }
+  pre { margin: 8px 0 0; padding: 10px; background: var(--surface-low); border-radius: 10px; color: var(--muted); font-family: var(--mono); font-size: 10.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .danger-zone { margin-top: 20px; }
+  .danger-zone b { font-size: 13px; }
+  .danger-zone .row { margin-top: 8px; }
+  footer { margin-top: 22px; text-align: center; color: var(--faint); font-size: 10.5px; line-height: 1.6; }
+  @media (min-width: 640px) {
+    .stats { grid-template-columns: repeat(3, 1fr); }
+    .hero h2 { font-size: 26px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .dot { animation: none; }
+    .bar-fill, .bar-reserve, .mini-fill { transition: none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <div class="logo" aria-hidden="true">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 16V4m0 0L8 8m4-4 4 4"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>
+        </svg>
+      </div>
+      <div>
+        <h1>Photo Drop</h1>
+        <p>Owner console</p>
+      </div>
+    </div>
+    <div class="live" id="livePill"><span class="dot"></span><span id="liveText">Live</span></div>
+  </header>
+
+  <section class="hero">
+    <div class="hero-top">
+      <div>
+        <p class="eyebrow">PHONE STATUS</p>
+        <h2 id="heroTitle">Connecting…</h2>
+        <p class="hero-sub" id="heroSub">Reading live state from the server.</p>
+      </div>
+      <div class="hero-badge" id="heroBadge">…</div>
+    </div>
+    <div class="storage">
+      <div class="storage-row"><span><b id="freeText">--</b> free</span><span id="usedText">--</span></div>
+      <div class="bar"><div class="bar-fill" id="freeBar" style="width:0%"></div><div class="bar-reserve" id="reserveBar" style="left:90%"></div></div>
+      <div class="storage-hint"><span>Safety reserve $reserve</span><span id="pctText">--</span></div>
+    </div>
+    <div class="stats">
+      <div class="stat"><span class="stat-label">Sessions</span><span class="stat-value" id="statSessions">0</span><span class="stat-sub" id="statConnected">0 connected</span></div>
+      <div class="stat"><span class="stat-label">Receiving</span><span class="stat-value" id="statInflight">0</span><span class="stat-sub" id="statUploading">idle</span></div>
+      <div class="stat"><span class="stat-label">Uploaded</span><span class="stat-value" id="statFiles">0</span><span class="stat-sub" id="statBytes">0 B</span></div>
+    </div>
+  </section>
+
+  <div class="section-head"><h2>Live sessions</h2><span id="sessionCount">0</span></div>
+  <div class="sessions" id="sessions"></div>
+  <div class="empty" id="sessionsEmpty">
+    <b>No one is connected yet.</b><br>
+    Send the drop link below. Sessions and file progress appear here the moment a guest opens it.
+  </div>
+
+  <div class="section-head"><h2>Recent uploads</h2><span id="recentCount"></span></div>
+  <div class="card list" id="recent"></div>
+
+  <div class="section-head"><h2>Share</h2></div>
+  <div class="card">
+    <p class="muted">This link is the credential. Anyone who has it can upload while the server is running.</p>
+    <div class="link-row">
+      <code id="dropUrl">$drop_url_html</code>
+      <button class="btn small" id="copyBtn" type="button">Copy</button>
+    </div>
+    <div class="row">
+      <a class="btn ghost" href="$drop_url_html" target="_blank" rel="noopener">Open guest page</a>
+      <span class="muted" id="copyState"></span>
+    </div>
+  </div>
+
+  <div class="section-head"><h2>System</h2><span id="lastUpdated">just now</span></div>
+  <div class="card sys">
+    <div class="kv"><span>Destination</span><code>$dest</code></div>
+    <div class="kv"><span>Storage</span><b id="sysStorage">--</b></div>
+    <div class="kv"><span>Uptime</span><b id="sysUptime">--</b></div>
+    <div class="kv"><span>Version</span><b>$version</b></div>
+    <div class="kv"><span>Limits</span><span id="sysLimits">$max_mb MB per file · $max_files per session · $max_concurrent at once</span></div>
+    <div class="kv"><span>Public URL</span><code id="sysPublic">--</code></div>
+    <details>
+      <summary>Media scan capabilities</summary>
+      <pre>$selftest</pre>
+    </details>
+  </div>
+
+  <div class="card danger-zone">
+    <b>Housekeeping</b>
+    <p class="muted" style="margin-top:4px">Remove stalled .part files older than 5 minutes or reset session history.</p>
+    <div class="row">
+      <button class="btn ghost" id="clearBtn" type="button">Clear temp cache</button>
+      <button class="btn ghost" id="clearSessionsBtn" type="button" style="color:#ef4444;border-color:rgba(239,68,68,0.3)">Clear sessions</button>
+      <button class="btn ghost" id="diagBtn" type="button">Download diagnostics</button>
+    </div>
+    <p class="muted" id="houseState" style="margin-top:8px"></p>
+  </div>
+
+  <footer>
+    Live over loopback in the app, or through the tunnel in a browser.<br>
+    Owner token stays in this URL — treat it like the drop link.
+  </footer>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var state = $initial_state_json;
+  var API = $api_url_js;
+  var CLEAR = $clear_url_js;
+  var CLEAR_SESSIONS = $clear_sessions_url_js;
+  var DIAG = $diag_url_js;
+  var DROP = $drop_url_js;
+  var lastUpdate = Date.now();
+  var online = true;
+
+  function esc(value) {
+    return String(value === null || value === undefined ? "" : value).replace(/[&<>"']/g, function (c) {
+      return {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c];
+    });
+  }
+
+  function ageText(seconds) {
+    if (seconds === null || seconds === undefined) return "just now";
+    var s = Math.max(0, Math.floor(seconds));
+    if (s < 5) return "just now";
+    if (s < 60) return s + "s ago";
+    var m = Math.floor(s / 60);
+    if (m < 60) return m + "m ago";
+    var h = Math.floor(m / 60);
+    if (h < 24) return h + "h ago";
+    return Math.floor(h / 24) + "d ago";
+  }
+
+  function stateLabel(stateName) {
+    if (stateName === "uploading") return "Uploading";
+    if (stateName === "recent") return "Just received";
+    if (stateName === "connected") return "Connected";
+    return "Idle";
+  }
+
+  function activityHtml(item) {
+    return '<div class="activity">'
+      + '<div class="activity-icon" aria-hidden="true">' + iconFile() + '</div>'
+      + '<div class="activity-body">'
+      + '<div class="activity-name">' + esc(item.name) + '</div>'
+      + '<div class="activity-meta">' + esc(item.label || "Guest") + ' · ' + esc(item.session || "") + ' · ' + esc(ageText(item.age)) + '</div>'
+      + '</div>'
+      + '<div class="activity-size">' + esc(item.size_human) + '</div>'
+      + '</div>';
+  }
+
+  function iconFile() {
+    return '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>';
+  }
+
+  function sessionHtml(s) {
+    var active = "";
+    if (s.active && s.active.length) {
+      active = '<div class="active-list">' + s.active.map(function (f) {
+        var pct = Math.max(0, Math.min(100, Number(f.pct) || 0));
+        return '<div class="active-file">'
+          + '<div class="active-top"><span class="fname">' + esc(f.name) + '</span><span class="fsize">' + pct + '%</span></div>'
+          + '<div class="mini-bar"><div class="mini-fill" style="width:' + pct + '%"></div></div>'
+          + '<div class="active-sub">' + esc(f.written_human) + ' of ' + esc(f.size_human)
+          + (f.bps_human ? ' · ' + esc(f.bps_human) : '') + '</div>'
+          + '</div>';
+      }).join('') + '</div>';
+    }
+    var recent = "";
+    if (s.recent && s.recent.length) {
+      recent = '<div class="chips">' + s.recent.map(function (f) {
+        return '<span class="chip">' + esc(f.name) + ' · ' + esc(f.size_human) + '</span>';
+      }).join('') + '</div>';
+    }
+    var initial = (s.label || "G").trim().charAt(0).toUpperCase() || "G";
+    var stateBadge = s.is_test
+      ? '<span class="pill" style="background:rgba(148,163,184,0.15);color:#94a3b8;border:1px solid rgba(148,163,184,0.3)">Test Probe</span>'
+      : '<span class="pill ' + esc(s.state) + '">' + esc(stateLabel(s.state)) + '</span>';
+    var metaText = s.is_test
+      ? 'Automated probe · ' + esc(s.ip || "local")
+      : 'Guest ' + esc(s.id) + ' · ' + esc(s.ip || "unknown IP");
+    return '<article class="session state-' + esc(s.state) + (s.is_test ? ' test-probe' : '') + '">'
+      + '<div class="s-top">'
+      + '<div class="avatar" aria-hidden="true">' + esc(initial) + '</div>'
+      + '<div class="s-id"><div class="s-name">' + esc(s.label || "Browser") + '</div>'
+      + '<div class="s-meta">' + metaText + '</div></div>'
+      + stateBadge
+      + '</div>'
+      + '<div class="s-stats"><span><b>' + esc(s.files) + '</b> file' + (s.files === 1 ? '' : 's') + '</span>'
+      + '<span><b>' + esc(s.bytes_human) + '</b> received</span>'
+      + '<span>seen ' + esc(ageText(s.last_seen_age)) + '</span></div>'
+      + active + recent
+      + '</article>';
+  }
+
+  function render(s) {
+    var totals = s.totals || {};
+    var storage = s.storage || {};
+    var sessions = s.sessions || [];
+    var inFlight = Number(totals.in_flight) || 0;
+    var uploading = Number(totals.uploading_sessions) || 0;
+
+    var title = inFlight > 0
+      ? "Receiving " + inFlight + (inFlight === 1 ? " file" : " files")
+      : (Number(totals.connected_sessions) > 0 ? "Phone is online" : "Ready for a drop");
+    document.getElementById("heroTitle").textContent = title;
+
+    var sub = Number(totals.sessions) > 0
+      ? totals.sessions + (totals.sessions === 1 ? " session" : " sessions") + " · "
+        + (totals.files || 0) + " files · " + (totals.bytes_human || "0 B") + " received"
+      : "No sessions yet. Share the link below when you are ready.";
+    document.getElementById("heroSub").textContent = sub;
+
+    var badge = document.getElementById("heroBadge");
+    if (storage.low) {
+      badge.textContent = "LOW STORAGE";
+      badge.className = "hero-badge warn";
+    } else if (inFlight > 0) {
+      badge.textContent = "LIVE";
+      badge.className = "hero-badge";
+    } else {
+      badge.textContent = "ONLINE";
+      badge.className = "hero-badge";
+    }
+
+    document.getElementById("freeText").textContent = storage.free_human || "--";
+    document.getElementById("usedText").textContent = storage.total
+      ? (storage.used_human || "0 B") + " of " + storage.total_human
+      : "storage unknown";
+    var freePct = Math.max(0, Math.min(100, Number(storage.free_pct) || 0));
+    document.getElementById("freeBar").style.width = freePct + "%";
+    var reservePct = storage.total ? Math.min(100, 100 * (Number(storage.reserve) || 0) / Number(storage.total)) : 0;
+    document.getElementById("reserveBar").style.left = Math.max(0, 100 - reservePct) + "%";
+    document.getElementById("pctText").textContent = freePct + "% free";
+
+    document.getElementById("statSessions").textContent = totals.sessions || 0;
+    var connectedSub = (totals.connected_sessions || 0) + " connected";
+    if (totals.test_sessions) {
+      connectedSub += " · " + totals.test_sessions + " probe" + (totals.test_sessions === 1 ? "" : "s");
+    }
+    document.getElementById("statConnected").textContent = connectedSub;
+    document.getElementById("statInflight").textContent = inFlight;
+    document.getElementById("statUploading").textContent = uploading > 0
+      ? uploading + (uploading === 1 ? " session" : " sessions")
+      : "idle";
+    document.getElementById("statFiles").textContent = totals.files || 0;
+    document.getElementById("statBytes").textContent = totals.bytes_human || "0 B";
+
+    var shownSessions = sessions.length;
+    var guestCount = totals.guest_sessions !== undefined ? totals.guest_sessions : totals.sessions;
+    var testCount = totals.test_sessions || 0;
+    var label = guestCount + (guestCount === 1 ? " guest" : " guests");
+    if (testCount > 0) {
+      label += " · " + testCount + " probe" + (testCount === 1 ? "" : "s");
+    }
+    document.getElementById("sessionCount").textContent = shownSessions
+      ? (shownSessions < (totals.total_sessions || totals.sessions)
+          ? "showing " + shownSessions + " of " + (totals.total_sessions || totals.sessions) + " (" + label + ")"
+          : label)
+      : "none";
+    document.getElementById("sessions").innerHTML = sessions.map(sessionHtml).join("");
+    document.getElementById("sessionsEmpty").style.display = sessions.length ? "none" : "block";
+
+    var recent = s.recent || [];
+    document.getElementById("recentCount").textContent = recent.length ? "last " + recent.length : "";
+    document.getElementById("recent").innerHTML = recent.length
+      ? recent.map(activityHtml).join("")
+      : '<div class="activity-empty">Nothing received yet.</div>';
+
+    document.getElementById("sysStorage").textContent = (storage.free_human || "--") + " free of " + (storage.total_human || "--");
+    document.getElementById("sysUptime").textContent = s.uptime_human || "--";
+    var limits = s.limits || {};
+    document.getElementById("sysLimits").textContent = (limits.max_file_human || "--") + " per file · "
+      + (limits.max_files || "--") + " per session · " + (limits.max_concurrent || "--") + " at once";
+    document.getElementById("sysPublic").textContent = (s.network && s.network.public_url) || "LAN only";
+    lastUpdate = Date.now();
+    renderFreshness();
+  }
+
+  function renderFreshness() {
+    var seconds = Math.floor((Date.now() - lastUpdate) / 1000);
+    document.getElementById("lastUpdated").textContent = online
+      ? (seconds < 3 ? "live now" : "updated " + ageText(seconds))
+      : "reconnecting…";
+  }
+
+  function renderPill() {
+    var pill = document.getElementById("livePill");
+    var text = document.getElementById("liveText");
+    if (online) {
+      pill.className = "live";
+      text.textContent = "Live";
+    } else {
+      pill.className = "live offline";
+      text.textContent = "Reconnecting";
+    }
+  }
+
+  function refresh(force) {
+    if (!force && document.hidden) return;
+    fetch(API, {cache: "no-store", headers: {"Accept": "application/json"}})
+      .then(function (response) {
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        return response.json();
+      })
+      .then(function (next) {
+        online = true;
+        renderPill();
+        render(next);
+      })
+      .catch(function () {
+        online = false;
+        renderPill();
+        renderFreshness();
+      });
+  }
+
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text);
+    }
+    return new Promise(function (resolve, reject) {
+      try {
+        var area = document.createElement("textarea");
+        area.value = text;
+        area.setAttribute("readonly", "");
+        area.style.position = "fixed";
+        area.style.opacity = "0";
+        document.body.appendChild(area);
+        area.select();
+        var ok = document.execCommand("copy");
+        document.body.removeChild(area);
+        ok ? resolve() : reject(new Error("copy failed"));
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+
+  var copyBtn = document.getElementById("copyBtn");
+  copyBtn.addEventListener("click", function () {
+    copyText(DROP).then(function () {
+      document.getElementById("copyState").textContent = "Copied to clipboard";
+      copyBtn.textContent = "Copied";
+      setTimeout(function () { copyBtn.textContent = "Copy"; }, 1800);
+    }).catch(function () {
+      document.getElementById("copyState").textContent = "Select the link above to copy manually.";
+    });
+  });
+
+  var clearBtn = document.getElementById("clearBtn");
+  var clearing = false;
+  clearBtn.addEventListener("click", function () {
+    if (clearing) return;
+    if (clearBtn.getAttribute("data-confirm") !== "1") {
+      clearBtn.setAttribute("data-confirm", "1");
+      clearBtn.textContent = "Tap again to confirm";
+      setTimeout(function () {
+        if (clearBtn.getAttribute("data-confirm") !== "1") return;
+        clearBtn.setAttribute("data-confirm", "0");
+        clearBtn.textContent = "Clear temp cache";
+      }, 3200);
+      return;
+    }
+    clearBtn.setAttribute("data-confirm", "0");
+    clearBtn.disabled = true;
+    clearBtn.textContent = "Clearing…";
+    clearing = true;
+    fetch(CLEAR, {method: "POST"})
+      .then(function (response) { return response.json(); })
+      .then(function (result) {
+        document.getElementById("houseState").textContent = result.removed
+          ? "Removed " + result.removed + " stale file(s), freed " + result.bytes_human + "."
+          : "No stale temp files found." + (result.skipped ? " " + result.skipped + " active file(s) left alone." : "");
+        refresh(true);
+      })
+      .catch(function () {
+        document.getElementById("houseState").textContent = "Could not clear temp files. Try again.";
+      })
+      .then(function () {
+        clearing = false;
+        clearBtn.disabled = false;
+        clearBtn.textContent = "Clear temp cache";
+      });
+  });
+
+  var clearSessionsBtn = document.getElementById("clearSessionsBtn");
+  var clearingSessions = false;
+  clearSessionsBtn.addEventListener("click", function () {
+    if (clearingSessions) return;
+    if (clearSessionsBtn.getAttribute("data-confirm") !== "1") {
+      clearSessionsBtn.setAttribute("data-confirm", "1");
+      clearSessionsBtn.textContent = "Confirm clear sessions?";
+      setTimeout(function () {
+        if (clearSessionsBtn.getAttribute("data-confirm") !== "1") return;
+        clearSessionsBtn.setAttribute("data-confirm", "0");
+        clearSessionsBtn.textContent = "Clear sessions";
+      }, 3500);
+      return;
+    }
+    clearSessionsBtn.setAttribute("data-confirm", "0");
+    clearSessionsBtn.disabled = true;
+    clearSessionsBtn.textContent = "Resetting…";
+    clearingSessions = true;
+    fetch(CLEAR_SESSIONS, {method: "POST"})
+      .then(function (response) { return response.json(); })
+      .then(function (result) {
+        document.getElementById("houseState").textContent = result.ok
+          ? "Cleared all sessions and batches."
+          : "Could not reset sessions.";
+        refresh(true);
+      })
+      .catch(function () {
+        document.getElementById("houseState").textContent = "Error resetting sessions.";
+      })
+      .then(function () {
+        clearingSessions = false;
+        clearSessionsBtn.disabled = false;
+        clearSessionsBtn.textContent = "Clear sessions";
+      });
+  });
+
+  document.getElementById("diagBtn").addEventListener("click", function () {
+    window.location.href = DIAG;
+  });
+
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) refresh(true);
+  });
+
+  renderPill();
+  render(state);
+  refresh(true);
+  setInterval(function () { refresh(false); }, 1200);
+  setInterval(renderFreshness, 1000);
+})();
+</script>
+</body></html>
