@@ -1816,19 +1816,20 @@ def _owner_token_from_request(token: str = "") -> str:
     return supplied
 
 
-def _owner_urls(token: str, supplied: str) -> tuple[str, str, str]:
-    """Return API, clear-cache and diagnostics URLs for the current auth form.
+def _owner_urls(token: str, supplied: str) -> tuple[str, str, str, str]:
+    """Return API, clear-cache, clear-sessions and diagnostics URLs for the current auth form.
 
     The path form is preferred because query strings leak through logs and
     Referer headers. The query form stays for already-bookmarked links.
     """
     if token:
         base = f"/owner/{quote(token, safe='')}"
-        return f"{base}/api/state", f"{base}/api/clear-parts", f"{base}/api/diagnostics"
+        return f"{base}/api/state", f"{base}/api/clear-parts", f"{base}/api/clear-sessions", f"{base}/api/diagnostics"
     key = quote(supplied, safe="")
     return (
         f"/owner/api/state?k={key}",
         f"/owner/api/clear-parts?k={key}",
+        f"/owner/api/clear-sessions?k={key}",
         f"/owner/api/diagnostics?k={key}",
     )
 
@@ -1849,7 +1850,7 @@ def owner_dashboard(token: str = ""):
     phone tunnel can be slow or offline; the dashboard still renders.
     """
     supplied = _owner_token_from_request(token)
-    api_url, clear_url, diag_url = _owner_urls(token, supplied)
+    api_url, clear_url, clear_sessions_url, diag_url = _owner_urls(token, supplied)
     drop_url = share_url()
     state = build_owner_state()
     initial_json = json.dumps(state).replace("</", "<\\/")
@@ -1864,6 +1865,7 @@ def owner_dashboard(token: str = ""):
         selftest=escape(media_scan_selftest()),
         api_url_js=json.dumps(api_url),
         clear_url_js=json.dumps(clear_url),
+        clear_sessions_url_js=json.dumps(clear_sessions_url),
         diag_url_js=json.dumps(diag_url),
         drop_url_js=json.dumps(drop_url),
         drop_url_html=escape(drop_url),
@@ -1911,6 +1913,39 @@ def owner_clear_parts(token: str = ""):
                 continue
     log(f"owner cleared {removed} stale partial(s), {freed}B")
     return jsonify(ok=True, removed=removed, bytes=freed, bytes_human=human(freed), skipped=skipped)
+
+
+@app.post("/owner/api/clear-sessions")
+@app.post("/owner/<token>/api/clear-sessions")
+def owner_clear_sessions(token: str = ""):
+    """Clear stale session history and batches."""
+    _owner_token_from_request(token)
+    with SESSION_LOCK:
+        global _SESSIONS_CACHE
+        _SESSIONS_CACHE = {}
+        if SESSIONS.exists():
+            SESSIONS.unlink(missing_ok=True)
+        if SESSION_META_FILE.exists():
+            SESSION_META_FILE.unlink(missing_ok=True)
+
+    with _ACTIVE_LOCK:
+        _SESSION_META.clear()
+
+    with BATCH_LOCK:
+        _BATCH_OWNERS.clear()
+
+    removed_batches = 0
+    if BATCHES.exists():
+        for d in list(BATCHES.iterdir()):
+            try:
+                if d.is_dir():
+                    shutil.rmtree(d, ignore_errors=True)
+                    removed_batches += 1
+            except OSError:
+                pass
+
+    log(f"owner cleared sessions and {removed_batches} batch(es)")
+    return jsonify(ok=True, removed_batches=removed_batches)
 
 
 @app.get("/owner/api/diagnostics")
@@ -2179,9 +2214,10 @@ PAGE_OWNER = Template("""<!doctype html>
 
   <div class="card danger-zone">
     <b>Housekeeping</b>
-    <p class="muted" style="margin-top:4px">Remove stalled .part files older than 5 minutes. Active uploads are never touched.</p>
+    <p class="muted" style="margin-top:4px">Remove stalled .part files older than 5 minutes or reset session history.</p>
     <div class="row">
       <button class="btn ghost" id="clearBtn" type="button">Clear temp cache</button>
+      <button class="btn ghost" id="clearSessionsBtn" type="button" style="color:#ef4444;border-color:rgba(239,68,68,0.3)">Clear sessions</button>
       <button class="btn ghost" id="diagBtn" type="button">Download diagnostics</button>
     </div>
     <p class="muted" id="houseState" style="margin-top:8px"></p>
@@ -2199,6 +2235,7 @@ PAGE_OWNER = Template("""<!doctype html>
   var state = $initial_state_json;
   var API = $api_url_js;
   var CLEAR = $clear_url_js;
+  var CLEAR_SESSIONS = $clear_sessions_url_js;
   var DIAG = $diag_url_js;
   var DROP = $drop_url_js;
   var lastUpdate = Date.now();
@@ -2472,6 +2509,42 @@ PAGE_OWNER = Template("""<!doctype html>
         clearing = false;
         clearBtn.disabled = false;
         clearBtn.textContent = "Clear temp cache";
+      });
+  });
+
+  var clearSessionsBtn = document.getElementById("clearSessionsBtn");
+  var clearingSessions = false;
+  clearSessionsBtn.addEventListener("click", function () {
+    if (clearingSessions) return;
+    if (clearSessionsBtn.getAttribute("data-confirm") !== "1") {
+      clearSessionsBtn.setAttribute("data-confirm", "1");
+      clearSessionsBtn.textContent = "Confirm clear sessions?";
+      setTimeout(function () {
+        if (clearSessionsBtn.getAttribute("data-confirm") !== "1") return;
+        clearSessionsBtn.setAttribute("data-confirm", "0");
+        clearSessionsBtn.textContent = "Clear sessions";
+      }, 3500);
+      return;
+    }
+    clearSessionsBtn.setAttribute("data-confirm", "0");
+    clearSessionsBtn.disabled = true;
+    clearSessionsBtn.textContent = "Resetting…";
+    clearingSessions = true;
+    fetch(CLEAR_SESSIONS, {method: "POST"})
+      .then(function (response) { return response.json(); })
+      .then(function (result) {
+        document.getElementById("houseState").textContent = result.ok
+          ? "Cleared all sessions and batches."
+          : "Could not reset sessions.";
+        refresh(true);
+      })
+      .catch(function () {
+        document.getElementById("houseState").textContent = "Error resetting sessions.";
+      })
+      .then(function () {
+        clearingSessions = false;
+        clearSessionsBtn.disabled = false;
+        clearSessionsBtn.textContent = "Clear sessions";
       });
   });
 
