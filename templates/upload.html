@@ -659,6 +659,18 @@
       const CHUNK_SIZE = 5 * 1024 * 1024;
       const isChunked = totalSize > 10 * 1024 * 1024;
 
+      if (isChunked && item.uploadedBytes === undefined) {
+        try {
+          const partRes = await fetch(`${BASE}/part/${encodeURIComponent(item.name)}`);
+          if (partRes.ok) {
+            const partData = await partRes.json();
+            if (partData.offset > 0 && partData.offset < totalSize) {
+              item.uploadedBytes = partData.offset;
+            }
+          }
+        } catch (_) {}
+      }
+
       while (attempts < 3) {
         if (app.isPaused) throw new Error('Transfer paused');
         try {

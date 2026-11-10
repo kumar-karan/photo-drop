@@ -1038,6 +1038,13 @@ def test_chunked_resumable_upload(client):
     # File not yet finalized in destination
     assert not (server.DEST / "Big_4K_Video.mov").exists()
 
+    # Verify part_status endpoint reports partial size
+    part_r = client.get(f"/d/{token}/part/{name}")
+    assert part_r.status_code == 200
+    part_d = part_r.get_json()
+    assert part_d["offset"] == len(chunk1)
+    assert part_d["exists"] is True
+
     # 2. Send chunk 2 (final chunk)
     r2 = client.post(
         f"/d/{token}/upload?batch={bid}&name={name}",

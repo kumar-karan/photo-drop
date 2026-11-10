@@ -1819,6 +1819,24 @@ def upload(token: str):
     return resp
 
 
+@app.get("/d/<token>/part/<name>")
+def part_status(token: str, name: str):
+    """Check the uploaded byte offset of an active partial upload for seamless resumption."""
+    sid, is_new = require_drop_token()
+    clean_name = secure_filename(name or "photo")
+    tmp = DEST / f".{clean_name}.part"
+    offset = tmp.stat().st_size if tmp.exists() else 0
+    resp = jsonify(
+        ok=True,
+        name=clean_name,
+        offset=offset,
+        exists=tmp.exists(),
+    )
+    if is_new:
+        set_session_cookie(resp, sid)
+    return resp
+
+
 @app.get("/d/<token>/done/<batch>")
 def done(token: str, batch: str):
     sid, is_new = require_drop_token()
