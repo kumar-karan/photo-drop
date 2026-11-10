@@ -52,23 +52,27 @@
   <!-- Main Responsive Container (Full screen on mobile, elegant max-w-md on desktop) -->
   <div class="w-full max-w-md mx-auto px-4 pt-4 sm:pt-6 flex flex-col gap-4">
 
-    <!-- Top Profile & Bell Row (Exact Studio Header) -->
+    <!-- Top Pairing Bar & Connection Status -->
     <header class="flex items-center justify-between pt-1">
       <div class="flex items-center gap-3">
-        <div class="w-11 h-11 rounded-full bg-[#D8F3DC] border-2 border-white shadow-xs overflow-hidden flex items-center justify-center">
-          <img src="https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=120&q=80" alt="Profile" class="w-full h-full object-cover" />
+        <div class="w-11 h-11 rounded-2xl bg-gradient-to-br from-[#1E50FF] to-[#1038CC] text-white shadow-xs flex items-center justify-center font-extrabold text-sm tracking-tight">
+          PD
         </div>
         <div>
-          <div class="text-xs font-bold text-zinc-900">Hi, iPhone 17 Pro</div>
-          <div id="ios-header-status" class="text-[11px] font-medium text-zinc-500 tabular-nums">Samsung Galaxy &bull; 105 GB Free</div>
+          <div class="text-xs font-extrabold text-zinc-900 tracking-tight flex items-center gap-1.5">
+            <span>iPhone</span>
+            <span class="text-zinc-400 font-normal">&rarr;</span>
+            <span>Samsung Galaxy</span>
+          </div>
+          <div id="ios-header-status" class="text-[11px] font-medium text-zinc-500 tabular-nums">Ready &bull; 105 GB Free</div>
         </div>
       </div>
-      <button type="button" onclick="switchIosTab('queue')" aria-label="Open Upload Queue"
-        class="w-10 h-10 rounded-full bg-white border border-zinc-200/80 flex items-center justify-center text-zinc-700 hover:bg-zinc-100 transition-colors relative shadow-xs">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+      <button type="button" onclick="hapticTap(); switchIosTab('queue')" aria-label="Open Upload Queue"
+        class="w-11 h-11 rounded-2xl bg-white border border-zinc-200/80 flex items-center justify-center text-zinc-700 hover:bg-zinc-100 active:scale-95 transition-all relative shadow-xs">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0" />
         </svg>
-        <span id="ios-bell-dot" class="w-2 h-2 rounded-full bg-electric absolute top-2.5 right-2.5"></span>
+        <span id="ios-bell-dot" class="w-2.5 h-2.5 rounded-full bg-electric absolute top-2.5 right-2.5 ring-2 ring-white"></span>
       </button>
     </header>
 
@@ -77,15 +81,15 @@
       Sync With Samsung
     </h1>
 
-    <!-- Search / Watermark Pill Bar -->
+    <!-- Direct Wi-Fi / Tunnel Status Bar -->
     <div class="bg-white rounded-full px-4 py-3 flex items-center justify-between shadow-soft">
       <div class="flex items-center gap-2.5 min-w-0">
-        <span id="ios-tunnel-dot" class="w-2.5 h-2.5 rounded-full bg-emerald-500 flex-shrink-0"></span>
-        <span id="ios-watermark-pill" class="text-xs font-medium text-zinc-500 truncate tabular-nums">
-          Watermark: Live &amp; Ready
+        <span id="ios-tunnel-dot" class="w-2.5 h-2.5 rounded-full bg-emerald-500 flex-shrink-0 animate-pulse"></span>
+        <span id="ios-watermark-pill" class="text-xs font-medium text-zinc-600 truncate tabular-nums">
+          Live Connection &bull; Ready
         </span>
       </div>
-      <button type="button" onclick="switchIosTab('photos')" class="text-zinc-700 hover:text-electric transition-colors" title="Filter Unsynced Photos">
+      <button type="button" onclick="hapticTap(); switchIosTab('photos')" class="text-zinc-700 hover:text-electric transition-colors p-1" title="Filter Unsynced Photos">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 6h9.75M10.5 6a1.5 1.5 0 11-3 0m3 0a1.5 1.5 0 10-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-9.75 0h9.75" />
         </svg>
@@ -325,44 +329,56 @@
   </div>
 
   <!-- =================================================================== -->
-  <!-- SIGNATURE FLOATING BLACK PILL BOTTOM NAV BAR (Matches Reference)    -->
+  <!-- SIGNATURE FLOATING BLACK PILL BOTTOM NAV BAR                        -->
   <!-- =================================================================== -->
-  <div class="fixed bottom-5 inset-x-6 max-w-sm mx-auto z-40">
-    <nav aria-label="iPhone Navigation" class="bg-pillnav rounded-full p-2 flex items-center justify-between shadow-pill">
-      <!-- Tab 1: Home -->
-      <button type="button" onclick="switchIosTab('home')" id="ios-nav-home"
+  <div class="fixed bottom-6 inset-x-4 max-w-sm mx-auto z-40 pb-[env(safe-area-inset-bottom,0px)]">
+    <!-- Ambient Mini Progress Dock (Visible when sync is running and user switches tabs) -->
+    <div id="ios-dock-mini-progress" onclick="hapticTap(); switchIosTab('queue')"
+      class="hidden mb-2 px-4 py-2.5 bg-zinc-900/95 backdrop-blur-md rounded-2xl text-white shadow-pill flex items-center justify-between cursor-pointer border border-white/10 active:scale-[0.98] transition-all">
+      <div class="flex items-center gap-2.5 min-w-0">
+        <span class="w-2.5 h-2.5 rounded-full bg-electric animate-pulse"></span>
+        <span id="mini-progress-label" class="text-xs font-extrabold truncate">Syncing...</span>
+      </div>
+      <span id="mini-progress-speed" class="font-mono text-[11px] text-zinc-300 tabular-nums">0.0 MB/s &rarr;</span>
+    </div>
+
+    <nav aria-label="iPhone Navigation" class="bg-pillnav rounded-full px-3 py-2 flex items-center justify-between shadow-pill border border-white/10">
+      <!-- Tab 1: Home (48x48px touch target) -->
+      <button type="button" onclick="hapticTap(); switchIosTab('home')" id="ios-nav-home"
         aria-label="Home"
-        class="w-10 h-10 rounded-full bg-white text-zinc-900 flex items-center justify-center transition-all shadow-xs">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+        class="w-12 h-12 rounded-full bg-white text-zinc-900 flex items-center justify-center transition-all shadow-xs active:scale-95">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12l8.954-8.955c.44-.439 1.152-.439 1.591 0L21.75 12M4.5 9.75v10.125c0 .621.504 1.125 1.125 1.125H9.75v-4.875c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21h4.125c.621 0 1.125-.504 1.125-1.125V9.75M8.25 21h8.25" />
         </svg>
       </button>
 
-      <!-- Tab 2: Photos Grid -->
-      <button type="button" onclick="switchIosTab('photos')" id="ios-nav-photos"
+      <!-- Tab 2: Photos Grid (48x48px touch target) -->
+      <button type="button" onclick="hapticTap(); switchIosTab('photos')" id="ios-nav-photos"
         aria-label="Selective Photos"
-        class="w-10 h-10 rounded-full text-white/70 hover:text-white flex items-center justify-center transition-all">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+        class="w-12 h-12 rounded-full text-white/70 hover:text-white flex items-center justify-center transition-all active:scale-95">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5zm10.5-11.25h.008v.008h-.008V8.25zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z" />
         </svg>
       </button>
 
-      <!-- CENTER ELECTRIC BLUE '+' PICKER TRIGGER -->
-      <button type="button" onclick="pickRealPhotos()" id="ios-nav-center-plus"
+      <!-- CENTER ELECTRIC BLUE '+' PICKER TRIGGER (52x52px touch target) -->
+      <button type="button" onclick="hapticTap(); pickRealPhotos()" id="ios-nav-center-plus"
         title="Add Photos from Camera Roll"
-        class="w-11 h-11 rounded-full bg-electric hover:bg-blue-600 active:scale-90 text-white flex items-center justify-center shadow-md transition-all">
-        <svg id="ios-center-btn-icon" class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+        aria-label="Add Photos from Camera Roll"
+        class="w-13 h-13 min-w-[52px] min-h-[52px] rounded-full bg-electric hover:bg-blue-600 active:scale-90 text-white flex items-center justify-center shadow-md transition-all">
+        <svg id="ios-center-btn-icon" class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
         </svg>
       </button>
 
-      <!-- Tab 3: Upload Queue -->
-      <button type="button" onclick="switchIosTab('queue')" id="ios-nav-queue"
+      <!-- Tab 3: Upload Queue (48x48px touch target) -->
+      <button type="button" onclick="hapticTap(); switchIosTab('queue')" id="ios-nav-queue"
         aria-label="Upload Progress"
-        class="w-10 h-10 rounded-full text-white/70 hover:text-white flex items-center justify-center transition-all relative">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+        class="w-12 h-12 rounded-full text-white/70 hover:text-white flex items-center justify-center transition-all relative active:scale-95">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
         </svg>
+        <span id="nav-queue-badge" class="hidden absolute top-2 right-2 w-2.5 h-2.5 bg-electric rounded-full ring-2 ring-pillnav"></span>
       </button>
     </nav>
   </div>
@@ -403,6 +419,15 @@
         audioKeepAlive.ctx.close();
       } catch (_) {}
       audioKeepAlive = null;
+    }
+
+    function hapticTap(type = 'light') {
+      if (!('vibrate' in navigator)) return;
+      try {
+        if (type === 'light') navigator.vibrate(10);
+        else if (type === 'success') navigator.vibrate([20, 50, 20]);
+        else if (type === 'error') navigator.vibrate([60, 80, 60]);
+      } catch (_) {}
     }
 
     async function probeLanFastPath() {
@@ -815,6 +840,7 @@
         if (remaining.length === 0) {
           app.isSyncing = false;
           disableAudioKeepAlive();
+          hapticTap('success');
           renderAll();
           break;
         }
@@ -827,6 +853,7 @@
             current.synced = true;
             current.selected = false;
             current.err = false;
+            hapticTap('light');
             if (current.url && current.url.startsWith('blob:')) {
               URL.revokeObjectURL(current.url);
             }
@@ -838,6 +865,7 @@
             current.errMessage = err.message || 'Failed';
             app.isSyncing = false;
             disableAudioKeepAlive();
+            hapticTap('error');
             renderAll();
             break;
           }
@@ -1132,6 +1160,24 @@
       renderIosHome(stats);
       renderIosPhotosScreen();
       renderIosQueueScreen(stats);
+
+      // Ambient mini progress dock update
+      const dock = document.getElementById('ios-dock-mini-progress');
+      const queueDot = document.getElementById('nav-queue-badge');
+      if (dock) {
+        if (app.isSyncing && app.iosTab !== 'queue') {
+          dock.classList.remove('hidden');
+          const syncedCount = app.items.filter(i => i.synced).length;
+          const totalCount = app.items.length;
+          const lbl = document.getElementById('mini-progress-label');
+          if (lbl) lbl.textContent = `Syncing ${syncedCount} of ${totalCount}...`;
+        } else {
+          dock.classList.add('hidden');
+        }
+      }
+      if (queueDot) {
+        queueDot.classList.toggle('hidden', !app.isSyncing);
+      }
     }
   </script>
 </body>

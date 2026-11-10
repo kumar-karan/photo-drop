@@ -1417,6 +1417,25 @@ def _security_headers(resp):
     return resp
 
 
+@app.errorhandler(400)
+@app.errorhandler(403)
+@app.errorhandler(404)
+@app.errorhandler(409)
+@app.errorhandler(411)
+@app.errorhandler(413)
+@app.errorhandler(416)
+@app.errorhandler(500)
+@app.errorhandler(503)
+def _handle_http_errors(exc):
+    """Return JSON error responses for API and data upload endpoints."""
+    # Only return JSON on non-page endpoints
+    if request.path.startswith("/d/") and not request.path.endswith("/"):
+        code = getattr(exc, "code", 500)
+        desc = getattr(exc, "description", "An error occurred")
+        return jsonify(ok=False, error=desc, code=code), code
+    return exc
+
+
 def html_page(body: str, status: int = 200):
     resp = make_response(body, status)
     resp.headers["Content-Type"] = "text/html; charset=utf-8"
@@ -1748,27 +1767,32 @@ def upload(token: str):
         tmp = dest_dir / f".{name}.part"
 
         # Check existing offset in partial file
-        mode = "ab" if (range_offset > 0 and tmp.exists()) else "wb"
         existing_size = tmp.stat().st_size if tmp.exists() else 0
-        if range_offset > 0 and existing_size != range_offset:
-            # If server part file does not match requested offset, reset or report conflict
-            range_offset = existing_size
-            mode = "ab"
+        if content_range and range_offset > 0 and existing_size != range_offset:
+            # Client requested non-matching range: reject with 416 to prevent payload corruption
+            log(f"range mismatch for {original}: client={range_offset}, server={existing_size}")
+            err = jsonify(ok=False, error="range offset mismatch", current_offset=existing_size)
+            err.headers["Content-Range"] = f"bytes */{existing_size}"
+            return err, 416
 
+        mode = "ab" if (range_offset > 0 and tmp.exists()) else "wb"
         written = range_offset
-        last_home_check = written
+        bytes_since_space_check = 0
         try:
             with open(tmp, mode) as out:
                 while True:
                     chunk = request.stream.read(256 * 1024)
                     if not chunk:
                         break
-                    written += len(chunk)
-                    if written > MAX_FILE_BYTES or not enough_space(written - existing_size):
-                        raise OSError("phone storage filled up mid-upload")
-                    if written - last_home_check >= 8 * 1024 * 1024:
-                        last_home_check = written
-                        if disk_free_home() < RESERVE_BYTES // 4:
+                    chunk_len = len(chunk)
+                    written += chunk_len
+                    bytes_since_space_check += chunk_len
+                    if written > MAX_FILE_BYTES:
+                        raise OSError("file is larger than the per-file limit")
+                    # Check space every 16MB instead of every 256KB to avoid FUSE syscall storm
+                    if bytes_since_space_check >= 16 * 1024 * 1024:
+                        bytes_since_space_check = 0
+                        if disk_free() < RESERVE_BYTES or disk_free_home() < RESERVE_BYTES // 4:
                             raise OSError("phone storage filled up mid-upload")
                     out.write(chunk)
                     update_transfer(transfer_id, written)
@@ -1780,7 +1804,10 @@ def upload(token: str):
 
             if is_complete:
                 os.replace(tmp, target)
-        except (OSError, ClientDisconnected) as exc:
+        except ClientDisconnected:
+            log(f"client disconnected mid-upload ({original})")
+            return jsonify(ok=False, error="client disconnected"), 499
+        except OSError as exc:
             if not content_range:
                 tmp.unlink(missing_ok=True)
             log(f"upload rejected ({original}): {exc}")

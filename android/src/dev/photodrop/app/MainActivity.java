@@ -287,6 +287,16 @@ public class MainActivity extends Activity {
         }
     }
 
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        if (poller != null) {
+            handler.removeCallbacks(poller);
+            poller = null;
+        }
+        exec.shutdown();
+    }
+
     private void applyInsets() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             findViewById(R.id.rootLayout).setOnApplyWindowInsetsListener((v, insets) -> {
@@ -633,13 +643,21 @@ public class MainActivity extends Activity {
                     tvDropHint.setText("Reachable on this Wi-Fi network. Scan to open the upload page.");
                 }
 
-                // Render or update QR Code if URL changed
+                // Render or update QR Code asynchronously on background executor to avoid UI thread jank
                 if (!shareUrl.equals(qrForUrl) && !shareUrl.isEmpty()) {
-                    Bitmap bmp = qrBitmap(shareUrl, dp(184));
-                    if (bmp != null) {
-                        imgQr.setImageBitmap(bmp);
-                        qrForUrl = shareUrl;
-                    }
+                    final String urlToEncode = shareUrl;
+                    final int qrSize = dp(184);
+                    qrForUrl = urlToEncode;
+                    exec.execute(() -> {
+                        Bitmap bmp = qrBitmap(urlToEncode, qrSize);
+                        if (bmp != null) {
+                            handler.post(() -> {
+                                if (!isFinishing() && !isDestroyed()) {
+                                    imgQr.setImageBitmap(bmp);
+                                }
+                            });
+                        }
+                    });
                 }
                 break;
 
