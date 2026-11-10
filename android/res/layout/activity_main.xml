@@ -6,207 +6,351 @@
     android:background="@color/page_bg"
     android:orientation="vertical">
 
-    <!-- ZONE 1: Top Status Band (Pinned) -->
+    <!-- ZONE 1: Top Status Band -->
     <dev.photodrop.app.StatusStripView
         android:id="@+id/statusStrip"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"/>
 
-    <!-- ZONE 2: Stage (Flex 1) -->
-    <FrameLayout
-        android:id="@+id/stage"
+    <!-- ZONE 2: Stage (Scrollable) -->
+    <ScrollView
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
-        android:paddingLeft="20dp"
-        android:paddingRight="20dp">
+        android:fillViewport="true"
+        android:overScrollMode="never"
+        android:scrollbars="none">
 
-        <!-- 1. Orb Stage (STOPPED / STARTING) -->
-        <LinearLayout
-            android:id="@+id/orbStage"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:gravity="center"
-            android:orientation="vertical">
-
-            <dev.photodrop.app.OrbView
-                android:id="@+id/orbView"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"/>
-
-            <TextView
-                android:id="@+id/tvOrbCaption"
-                android:layout_width="260dp"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="20dp"
-                android:gravity="center"
-                android:lineSpacingExtra="3dp"
-                android:text="One tap and this becomes a link you can hand to a friend."
-                android:textColor="@color/text_faint"
-                android:textSize="13sp"/>
-        </LinearLayout>
-
-        <!-- 2. Handoff Card (ONLINE) -->
-        <LinearLayout
-            android:id="@+id/handoffCard"
+        <FrameLayout
+            android:id="@+id/stage"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_gravity="center"
-            android:background="@drawable/card_handoff"
-            android:gravity="center_horizontal"
-            android:orientation="vertical"
-            android:paddingLeft="20dp"
-            android:paddingRight="20dp"
-            android:paddingTop="18dp"
-            android:paddingBottom="18dp"
-            android:visibility="gone">
+            android:paddingLeft="18dp"
+            android:paddingRight="18dp"
+            android:paddingTop="12dp"
+            android:paddingBottom="16dp">
 
-            <!-- Docked Live Badge -->
-            <TextView
-                android:id="@+id/tvDockedBadge"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:background="@drawable/badge_live"
-                android:paddingLeft="12dp"
-                android:paddingTop="4dp"
-                android:paddingRight="12dp"
-                android:paddingBottom="4dp"
-                android:text="● LIVE"
-                android:textColor="#FFFFFF"
-                android:textSize="10.5sp"
-                android:textStyle="bold"/>
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
-                android:letterSpacing="0.08"
-                android:text="HOLD THIS UP TO YOUR FRIEND"
-                android:textColor="@color/text_faint"
-                android:textSize="10sp"
-                android:textStyle="bold"/>
-
-            <!-- Hostname / Domain headline -->
-            <TextView
-                android:id="@+id/tvDropDomain"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:ellipsize="end"
-                android:singleLine="true"
-                android:text="trycloudflare.com"
-                android:textColor="@color/text_main"
-                android:textSize="18sp"
-                android:textStyle="bold"/>
-
-            <!-- Monospace full URL -->
-            <TextView
-                android:id="@+id/tvDropUrl"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="2dp"
-                android:ellipsize="middle"
-                android:fontFamily="monospace"
-                android:singleLine="true"
-                android:text="https://.../d/..."
-                android:textColor="@color/mono_text"
-                android:textSize="11.5sp"/>
-
-            <!-- 184dp ARM'S-LENGTH QR CODE -->
-            <ImageView
-                android:id="@+id/imgQr"
-                android:layout_width="184dp"
-                android:layout_height="184dp"
-                android:layout_marginTop="12dp"
-                android:background="#FFFFFF"
-                android:contentDescription="QR code for photo drop link"
-                android:padding="6dp"
-                android:scaleType="fitCenter"/>
-
-            <TextView
-                android:id="@+id/tvDropHint"
-                android:layout_width="260dp"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
-                android:gravity="center"
-                android:lineSpacingExtra="2dp"
-                android:text="They scan, pick photos, watch them upload. Nothing is installed on their phone."
-                android:textColor="@color/text_faint"
-                android:textSize="12sp"/>
-        </LinearLayout>
-
-        <!-- 3. Storage Alert Card (STORAGE_LOW) -->
-        <LinearLayout
-            android:id="@+id/alertCard"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_gravity="center"
-            android:background="@drawable/card_alert"
-            android:orientation="vertical"
-            android:padding="20dp"
-            android:visibility="gone">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Free some space first"
-                android:textColor="#8C1D18"
-                android:textSize="17sp"
-                android:textStyle="bold"/>
-
-            <TextView
-                android:id="@+id/tvAlertDesc"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:lineSpacingExtra="2dp"
-                android:text="Uploads are paused at 2.0 GB free to keep your phone healthy. Free some storage to resume."
-                android:textColor="#8C1D18"
-                android:textSize="13sp"/>
-        </LinearLayout>
-
-        <!-- 4. Termux Error Card (TERMUX_ERROR) -->
-        <LinearLayout
-            android:id="@+id/permCard"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_gravity="center"
-            android:background="@drawable/card_dark"
-            android:orientation="vertical"
-            android:padding="20dp"
-            android:visibility="gone">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Can't reach Termux"
-                android:textColor="#FFFFFF"
-                android:textSize="17sp"
-                android:textStyle="bold"/>
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:lineSpacingExtra="2dp"
-                android:text="Grant permission to run commands in Termux, or ensure Termux is installed and running."
-                android:textColor="#C7CCD1"
-                android:textSize="13sp"/>
-
-            <Button
-                android:id="@+id/btnFixPerm"
+            <!-- 1. Orb Stage (STOPPED / STARTING) -->
+            <LinearLayout
+                android:id="@+id/orbStage"
                 android:layout_width="match_parent"
-                android:layout_height="44dp"
-                android:layout_marginTop="14dp"
-                android:background="@drawable/btn_primary"
-                android:text="Grant Permission"
-                android:textAllCaps="false"
-                android:textColor="#FFFFFF"
-                android:textSize="14sp"
-                android:textStyle="bold"/>
-        </LinearLayout>
+                android:layout_height="match_parent"
+                android:gravity="center"
+                android:orientation="vertical"
+                android:paddingTop="30dp"
+                android:paddingBottom="30dp">
 
-    </FrameLayout>
+                <dev.photodrop.app.OrbView
+                    android:id="@+id/orbView"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"/>
+
+                <TextView
+                    android:id="@+id/tvOrbCaption"
+                    android:layout_width="260dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="20dp"
+                    android:gravity="center"
+                    android:lineSpacingExtra="3dp"
+                    android:text="One tap and this becomes a link you can hand to a friend."
+                    android:textColor="@color/text_faint"
+                    android:textSize="13sp"/>
+            </LinearLayout>
+
+            <!-- 2. Handoff & Storage Dashboard Container (ONLINE) -->
+            <LinearLayout
+                android:id="@+id/handoffCard"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <!-- MAIN HANDOFF CARD -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/card_handoff"
+                    android:gravity="center_horizontal"
+                    android:orientation="vertical"
+                    android:paddingLeft="20dp"
+                    android:paddingRight="20dp"
+                    android:paddingTop="16dp"
+                    android:paddingBottom="18dp">
+
+                    <!-- Docked Live Badge -->
+                    <TextView
+                        android:id="@+id/tvDockedBadge"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:background="@drawable/badge_live"
+                        android:paddingLeft="12dp"
+                        android:paddingTop="4dp"
+                        android:paddingRight="12dp"
+                        android:paddingBottom="4dp"
+                        android:text="● LIVE"
+                        android:textColor="#FFFFFF"
+                        android:textSize="10.5sp"
+                        android:textStyle="bold"/>
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:letterSpacing="0.08"
+                        android:text="SCAN TO SEND ORIGINAL PHOTOS"
+                        android:textColor="@color/text_faint"
+                        android:textSize="9.5sp"
+                        android:textStyle="bold"/>
+
+                    <!-- Hostname / Domain headline -->
+                    <TextView
+                        android:id="@+id/tvDropDomain"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="3dp"
+                        android:ellipsize="end"
+                        android:singleLine="true"
+                        android:text="trycloudflare.com"
+                        android:textColor="@color/text_main"
+                        android:textSize="18sp"
+                        android:textStyle="bold"/>
+
+                    <!-- Monospace full URL -->
+                    <TextView
+                        android:id="@+id/tvDropUrl"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:ellipsize="middle"
+                        android:fontFamily="monospace"
+                        android:singleLine="true"
+                        android:text="https://.../d/..."
+                        android:textColor="@color/mono_text"
+                        android:textSize="11sp"/>
+
+                    <!-- 180dp ARM'S-LENGTH QR CODE -->
+                    <ImageView
+                        android:id="@+id/imgQr"
+                        android:layout_width="180dp"
+                        android:layout_height="180dp"
+                        android:layout_marginTop="12dp"
+                        android:background="#FFFFFF"
+                        android:contentDescription="QR code for photo drop link"
+                        android:padding="6dp"
+                        android:scaleType="fitCenter"/>
+
+                    <TextView
+                        android:id="@+id/tvDropHint"
+                        android:layout_width="260dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="10dp"
+                        android:gravity="center"
+                        android:lineSpacingExtra="2dp"
+                        android:text="They scan, pick photos, watch them upload. Nothing is installed on their phone."
+                        android:textColor="@color/text_faint"
+                        android:textSize="12sp"/>
+                </LinearLayout>
+
+                <!-- MINT STORAGE FOLDERS CONTAINER (From Studio Inspo) -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:background="@drawable/card_mint"
+                    android:orientation="vertical"
+                    android:padding="14dp">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Samsung Storage Folders"
+                        android:textColor="@color/mint_text"
+                        android:textSize="12sp"
+                        android:textStyle="bold"/>
+
+                    <!-- Folder 1: DCIM / PhotoDrop -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:background="@drawable/card_handoff"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal"
+                        android:padding="10dp">
+
+                        <TextView
+                            android:layout_width="32dp"
+                            android:layout_height="32dp"
+                            android:background="@drawable/pill_success"
+                            android:gravity="center"
+                            android:text="📁"
+                            android:textSize="14sp"/>
+
+                        <LinearLayout
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="10dp"
+                            android:layout_weight="1"
+                            android:orientation="vertical">
+
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="DCIM / PhotoDrop"
+                                android:textColor="@color/text_main"
+                                android:textSize="12.5sp"
+                                android:textStyle="bold"/>
+
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="Direct inbox • Google Photos backup"
+                                android:textColor="@color/text_faint"
+                                android:textSize="10.5sp"/>
+                        </LinearLayout>
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:background="@drawable/badge_live"
+                            android:paddingLeft="8dp"
+                            android:paddingTop="2dp"
+                            android:paddingRight="8dp"
+                            android:paddingBottom="2dp"
+                            android:text="ACTIVE"
+                            android:textColor="#FFFFFF"
+                            android:textSize="9sp"
+                            android:textStyle="bold"/>
+                    </LinearLayout>
+
+                    <!-- Folder 2: High-Watermark Ledger -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:background="@drawable/card_handoff"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal"
+                        android:padding="10dp">
+
+                        <TextView
+                            android:layout_width="32dp"
+                            android:layout_height="32dp"
+                            android:background="@drawable/pill_neutral"
+                            android:gravity="center"
+                            android:text="⚡"
+                            android:textSize="14sp"/>
+
+                        <LinearLayout
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="10dp"
+                            android:layout_weight="1"
+                            android:orientation="vertical">
+
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="sync_ledger.json"
+                                android:textColor="@color/text_main"
+                                android:textSize="12.5sp"
+                                android:textStyle="bold"/>
+
+                            <TextView
+                                android:id="@+id/tvLedgerSubtitle"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:fontFamily="monospace"
+                                android:text="High-watermark auto resume active"
+                                android:textColor="@color/text_faint"
+                                android:textSize="10.5sp"/>
+                        </LinearLayout>
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="DIFF"
+                            android:textColor="@color/primary"
+                            android:textSize="10.5sp"
+                            android:textStyle="bold"/>
+                    </LinearLayout>
+                </LinearLayout>
+
+            </LinearLayout>
+
+            <!-- 3. Storage Alert Card (STORAGE_LOW) -->
+            <LinearLayout
+                android:id="@+id/alertCard"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:background="@drawable/card_alert"
+                android:orientation="vertical"
+                android:padding="20dp"
+                android:visibility="gone">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Free some space first"
+                    android:textColor="#8C1D18"
+                    android:textSize="17sp"
+                    android:textStyle="bold"/>
+
+                <TextView
+                    android:id="@+id/tvAlertDesc"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:lineSpacingExtra="2dp"
+                    android:text="Uploads are paused at 2.0 GB free to keep your phone healthy. Free some storage to resume."
+                    android:textColor="#8C1D18"
+                    android:textSize="13sp"/>
+            </LinearLayout>
+
+            <!-- 4. Termux Error Card (TERMUX_ERROR) -->
+            <LinearLayout
+                android:id="@+id/permCard"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:background="@drawable/card_dark"
+                android:orientation="vertical"
+                android:padding="20dp"
+                android:visibility="gone">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Can't reach Termux"
+                    android:textColor="#FFFFFF"
+                    android:textSize="17sp"
+                    android:textStyle="bold"/>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:lineSpacingExtra="2dp"
+                    android:text="Grant permission to run commands in Termux, or ensure Termux is installed and running."
+                    android:textColor="#C7CCD1"
+                    android:textSize="13sp"/>
+
+                <Button
+                    android:id="@+id/btnFixPerm"
+                    android:layout_width="match_parent"
+                    android:layout_height="44dp"
+                    android:layout_marginTop="14dp"
+                    android:background="@drawable/btn_primary"
+                    android:text="Grant Permission"
+                    android:textAllCaps="false"
+                    android:textColor="#FFFFFF"
+                    android:textSize="14sp"
+                    android:textStyle="bold"/>
+            </LinearLayout>
+
+        </FrameLayout>
+    </ScrollView>
 
     <!-- ZONE 3: Pinned Bottom Sheet -->
     <LinearLayout
@@ -271,17 +415,17 @@
                     android:textSize="15sp"/>
             </LinearLayout>
 
-            <!-- Copy Link Button -->
+            <!-- Copy Link Button (Pill shaped Electric Blue) -->
             <Button
                 android:id="@+id/btnCopy"
                 android:layout_width="match_parent"
-                android:layout_height="48dp"
+                android:layout_height="46dp"
                 android:layout_marginTop="10dp"
                 android:background="@drawable/btn_primary"
                 android:text="Copy link to send"
                 android:textAllCaps="false"
                 android:textColor="@color/on_primary"
-                android:textSize="15sp"
+                android:textSize="14.5sp"
                 android:textStyle="bold"/>
 
             <View
@@ -292,7 +436,7 @@
                 android:background="@color/stroke_soft"/>
         </LinearLayout>
 
-        <!-- Storage & Session Row (always present in peek & full) -->
+        <!-- Storage & Session Row -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -331,7 +475,7 @@
                 android:textStyle="bold"/>
         </LinearLayout>
 
-        <!-- Live In-Flight Transfer Card (Visible when uploading or actively receiving) -->
+        <!-- Live In-Flight Transfer Card -->
         <LinearLayout
             android:id="@+id/liveTransferBox"
             android:layout_width="match_parent"
@@ -396,7 +540,7 @@
                 android:textSize="11.5sp"/>
         </LinearLayout>
 
-        <!-- Live Stop Button + Guard (Visible when live) -->
+        <!-- Live Stop Button -->
         <LinearLayout
             android:id="@+id/liveStopSection"
             android:layout_width="match_parent"
@@ -415,11 +559,9 @@
                 android:textColor="#B3261E"
                 android:textSize="14sp"
                 android:textStyle="bold"/>
-
-
         </LinearLayout>
 
-        <!-- ZONE 4: Nav Row (Owner dashboard link) -->
+        <!-- ZONE 4: Owner Dashboard Action -->
         <Button
             android:id="@+id/btnOwner"
             android:layout_width="match_parent"

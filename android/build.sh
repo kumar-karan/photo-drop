@@ -32,28 +32,22 @@ else
   echo "bootstrapping ./android-sdk (command-line tools + platform 34)..."
   mkdir -p "$PWD/android-sdk/cmdline-tools"
   cd "$PWD/android-sdk/cmdline-tools"
-  # Linux/macOS arm64+x64 share the same download (darwin arm64 uses the same zip name from Google).
-  case "$(uname -m)" in
-    arm64) PLAT=mac ;;
-    x86_64) PLAT="linux mac" ;;
-    *) PLAT=linux ;;
-  esac
-  for p in $PLAT; do
-    case "$p" in
-      linux)  URL="https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" ;;
-      mac)    URL="https://dl.google.com/android/repository/commandlinetools-mac-11076708_latest.zip" ;;
-    esac
-    break
-  done
+  URL="https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
   ZIP="$PWD/cmdline-tools.zip"
   echo "  fetching $URL"
   curl -fL "$URL" -o "$ZIP"
-  unzip -q -o "$ZIP"
-  for d in cmdline-tools/*; do [ -d "$d" ] && mv "$d" latest; done
-  [ -d cmdline-tools/cmdline-tools ] && mv cmdline-tools/cmdline-tools latest
+  mkdir -p extracted
+  unzip -q -o "$ZIP" -d extracted
   rm -f "$ZIP"
-  yes | ./latest/bin/sdkmanager --licenses >/dev/null 2>&1 || true
-  ./latest/bin/sdkmanager "platforms;android-34" "build-tools;34.0.0" >/dev/null
+  if [ -d "extracted/cmdline-tools" ]; then
+    mv extracted/cmdline-tools latest
+  else
+    mv extracted latest
+  fi
+  rm -rf extracted
+  MGR="./latest/bin/sdkmanager"
+  yes | "$MGR" --sdk_root="$PWD/.." --licenses >/dev/null 2>&1 || true
+  "$MGR" --sdk_root="$PWD/.." "platforms;android-34" "build-tools;34.0.0" >/dev/null
   cd "$PWD/.."
   SDK="$PWD/android-sdk"
   echo "SDK ready: $SDK"

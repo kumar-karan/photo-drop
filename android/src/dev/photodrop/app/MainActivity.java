@@ -87,6 +87,7 @@ public class MainActivity extends Activity {
     TextView tvDropUrl;
     ImageView imgQr;
     TextView tvDropHint;
+    TextView tvLedgerSubtitle;
 
     View alertCard;
     TextView tvAlertDesc;
@@ -141,6 +142,7 @@ public class MainActivity extends Activity {
         tvDropUrl = findViewById(R.id.tvDropUrl);
         imgQr = findViewById(R.id.imgQr);
         tvDropHint = findViewById(R.id.tvDropHint);
+        tvLedgerSubtitle = findViewById(R.id.tvLedgerSubtitle);
 
         alertCard = findViewById(R.id.alertCard);
         tvAlertDesc = findViewById(R.id.tvAlertDesc);
@@ -540,6 +542,14 @@ public class MainActivity extends Activity {
             tvSessions.setTextColor(h.sessions > 0 ? getColor(R.color.success) : getColor(R.color.text_muted));
 
             liveTransferBox.setVisibility(View.GONE);
+        }
+
+        if (tvLedgerSubtitle != null) {
+            if (h.watermark != null && !h.watermark.isEmpty()) {
+                tvLedgerSubtitle.setText("Watermark: " + h.watermark);
+            } else {
+                tvLedgerSubtitle.setText("Watermark: Live & Ready");
+            }
         }
 
         // State layout switching
